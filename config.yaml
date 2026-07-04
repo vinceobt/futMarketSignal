@@ -1,0 +1,49 @@
+# futmarket configuration
+# Everything the collector, scheduler, and (later) signal engine reads lives here.
+
+# Active price source adapter. Options: "mock" (dev/testing), "manual" (log prices
+# yourself via `futmarket log-price`). Automated web sources are intentionally
+# absent until a sanctioned one exists — see README "Data source status".
+source: turnstile_mock
+
+# Console market (PS + Xbox share one market since FC25). "pc" is the other option.
+platform: console
+
+# Minutes between automated collection passes (only used when source != manual).
+# Keep this >= 30. Politeness is a design constraint, not a tunable.
+poll_minutes: 45
+
+# Seconds of random extra delay between per-player fetches within a pass.
+inter_player_delay_seconds: [3, 6]
+
+# A pass skips a player whose latest snapshot is younger than
+# poll_minutes * skip_guard_fraction (makes restarts idempotent).
+skip_guard_fraction: 0.5
+
+# Circuit breaker: after this many consecutive source failures, pause the
+# source for cooldown_minutes instead of hammering it.
+max_consecutive_failures: 3
+cooldown_minutes: 60
+
+# Identify yourself honestly on any future HTTP source. Put a contact in it.
+user_agent: "fc-market-analytics/0.1 (personal price tracker; contact: set-me-in-config)"
+
+# Hard cap enforced by config validation.
+max_watchlist_size: 50
+
+database_path: data/market.db
+log_path: data/collector.log
+
+# Watchlist: player_id is YOUR stable slug (used everywhere in the DB — don't
+# rename after data starts accumulating). Edit freely; cap is 50.
+watchlist:
+  - { player_id: haaland-97-fof,     name: "Erling Haaland",    rating: 97, position: ST,  version: "FOF Glory Hunters" }
+  - { player_id: mbappe-base,        name: "Kylian Mbappé",     rating: 91, position: ST,  version: "Base Gold" }
+  - { player_id: bellingham-base,    name: "Jude Bellingham",   rating: 90, position: CM,  version: "Base Gold" }
+  - { player_id: salah-base,         name: "Mohamed Salah",     rating: 89, position: RW,  version: "Base Gold" }
+  - { player_id: vinicius-base,      name: "Vinícius Jr.",      rating: 90, position: LW,  version: "Base Gold" }
+  - { player_id: yamal-base,         name: "Lamine Yamal",      rating: 90, position: RW,  version: "Base Gold" }
+  - { player_id: van-dijk-base,      name: "Virgil van Dijk",   rating: 89, position: CB,  version: "Base Gold" }
+  - { player_id: rodri-base,         name: "Rodri",             rating: 90, position: CDM, version: "Base Gold" }
+  # Phase 1 will add a fodder basket here (cheap stable golds) to compute the
+  # market_index used for inflation-normalized prices.

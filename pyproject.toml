@@ -1,0 +1,29 @@
+[project]
+name = "futmarket"
+version = "0.1.0"
+description = "FUT market intelligence: decision-support price tracking and signals for EA FC Ultimate Team. Never trades, never touches EA credentials."
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "beautifulsoup4>=4.12",
+    "PyYAML>=6.0",
+    "APScheduler>=3.10",
+    "patchright",
+    "camoufox[geoip]",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+futmarket = "futmarket.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
