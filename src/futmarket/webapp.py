@@ -175,6 +175,31 @@ def create_app(config_path, source: str | None = None, access_key: str | None = 
             conn.close()
         return {"removed": player_id}
 
+    # ---- rebound advisor: paper positions ----
+    @app.get("/api/positions")
+    def positions():
+        conn = _conn()
+        try:
+            rows = [dict(r) for r in db.positions_list(conn)]
+            # attach the latest known price for open positions (unrealized %)
+            src = source or _default_source(conn, config)
+            for r in rows:
+                if r["status"] == "open":
+                    last = conn.execute(
+                        "SELECT price FROM price_snapshots WHERE player_id=? AND source=? "
+                        "ORDER BY timestamp DESC LIMIT 1", (r["player_id"], src)).fetchone()
+                    cur = last["price"] if last else None
+                    r["current_price"] = cur
+                    r["unrealized_pct"] = (round((cur * (1 - config.tax_rate) / r["entry_price"] - 1) * 100, 1)
+                                           if cur else None)
+            return {"positions": rows}
+        finally:
+            conn.close()
+
+    @app.post("/api/advise")
+    def advise():
+        return {"job_id": runner.submit("advise", detail="run advisor")}
+
     # ---- momentum scanner ----
     @app.get("/api/momentum")
     def momentum():

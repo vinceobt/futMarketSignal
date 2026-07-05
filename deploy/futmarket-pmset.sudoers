@@ -1,0 +1,4 @@
+# Installed to /etc/sudoers.d/futmarket-pmset (mode 0440) by install_autonomous.sh.
+# Lets the autonomous collector arm/cancel power-wake schedules WITHOUT a password.
+# Scoped to pmset scheduling only — it grants no other privilege.
+__USER__ ALL=(root) NOPASSWD: /usr/bin/pmset schedule wake *, /usr/bin/pmset schedule cancelall

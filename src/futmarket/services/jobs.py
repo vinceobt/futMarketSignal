@@ -23,7 +23,7 @@ from . import analytics, watch
 log = logging.getLogger("futmarket.jobs")
 
 JOB_TYPES = {"collect", "collect_one", "backtest", "signals", "build_features",
-             "momentum"}
+             "momentum", "advise"}
 
 
 def _now() -> str:
@@ -147,6 +147,15 @@ class JobRunner:
         cfg = self._cfg()
         n = features.build_and_store(conn, cfg, cfg.source)
         db.update_job(conn, job_id, detail=f"built {n} feature rows")
+
+    def _run_advise(self, conn, job_id, params):
+        from . import advisor
+        cfg = self._cfg()
+        db.append_job_log(conn, job_id, "running rebound advisor…")
+        res = advisor.run(conn, cfg, cfg.source)
+        db.update_job(conn, job_id, result_json=json.dumps(res),
+                      detail=f"opened {len(res['opened'])} · closed {len(res['closed'])} "
+                             f"· holding {len(res['holding'])}")
 
     def _run_momentum(self, conn, job_id, params):
         from ..collectors import momentum_source

@@ -241,6 +241,110 @@ boundary) — it renders what the pipeline stored and never collects or trades.
 
 ---
 
+## Rebound strategy & alerts
+
+Beyond the z-score signal, the app has a **rebound advisor**: it hunts cards that
+**reliably bounce off a floor** over ~1 month, alerts you to **BUY** when one is
+near its floor now, tracks a **paper position**, and alerts you to **SELL** once
+it's up a fixed profit target (net of the 5% tax). Alerts go to **Discord**.
+
+```bash
+futmarket advise --dry-run          # show what it WOULD buy/sell — writes nothing, sends nothing
+futmarket advise                    # for real: open/close paper positions + send Discord alerts
+futmarket positions                 # list open/closed paper positions
+futmarket backtest --strategy rebound   # score the strategy vs baselines on YOUR data
+```
+
+Set `alerts.destination: discord` and paste a channel **webhook URL** in
+`config.yaml`. Tune the pattern under `strategy:` (`window_days`, `min_bounces`,
+`buy_zone_pct`, `target_pct`, `stop_pct`, `momentum_screen_limit`). When you run
+autonomously (below), `advise` runs after every collection pass, so alerts fire on
+their own. In the dashboard, a **Positions** card shows open/closed positions and
+a **Run advisor** button.
+
+**How it decides.** The launch price is irrelevant — only the *recent trading
+range* matters. Over the trailing `window_days` it finds the support floor,
+counts *completed rebounds* (dip to the floor → recover ≥ `target_pct`), and
+checks the **sequence of rebound troughs**: a card that keeps bouncing off ~the
+same floor is a stable rebounder; one making progressively *lower lows* is a
+falling knife and is rejected. Crucially, a card that launched high, **crashed,
+and then settled into a range** is a valid buy — the crash is ignored because it
+never dips into the buy-zone, so it's never counted as a trough. BUY = reliable
+rebounder **and** price in the buy-zone now.
+
+**Selling — two modes (`strategy.sell_mode`):**
+- `target` (default): sell at a **fixed profit** — `target_pct` (default **25%**)
+  net of the 5% tax. Predictable, always exits.
+- `resistance`: **ride the swing to the ceiling** — sell when price returns near
+  the range's resistance (the `resistance_pctile` percentile of the card's actual
+  rebound *peaks*, crash-robust). Captures the whole move (on a 1.2k↔3k card that's
+  ~+120% vs ~+25% for a fixed target) but may miss an exit if a cycle falls short
+  of the ceiling.
+
+Both modes honor the optional stop below the floor.
+
+**Honesty caveats.**
+- **Paper only** — it alerts *you* and tracks a virtual position; it never trades
+  or touches EA (see scope boundary).
+- **Backtest it first.** On a watchlist of promo/TOTS cards that launched high and
+  crashed (not rebounders), it correctly makes **zero trades** — it only fires on
+  genuinely range-bound cards. Prove it on your data with `backtest --strategy
+  rebound` before trusting the alerts, and feed it cards that actually oscillate.
+
+---
+
+## Discovery scan (find new range-bound cards)
+
+`futmarket scan-momentum` refreshes fut.gg's momentum movers, screens the ones you
+don't track for the rebound pattern, and **auto-adds only the ones in their
+buy-zone right now** (actionable immediately — reliable rebounders sitting above
+their floor are noted and picked up on a later scan when they dip). `--dry-run`
+reports without adding. It writes to `data/scan.log` and posts a Discord notice
+when it adds cards.
+
+Discovery moves on the scale of days, so it runs **every 6 hours**, not every
+cycle. It's installed automatically alongside the collector by
+`make autonomous-install` (below) as a second LaunchAgent — it needs no wake of
+its own; it rides the collector's wakes. Change the cadence with
+`--scan-interval-min N`, or skip it with `--no-scan`.
+
+## Run it autonomously (macOS)
+
+Collect on a schedule with no terminal and no dashboard open — **3× per hour
+(every 20 min), waking the Mac from sleep** so it keeps going 24/7:
+
+```bash
+make autonomous-install       # every 20 min, wakes the Mac (default)
+make autonomous-status        # is it loaded? next wake? recent log
+make autonomous-log           # follow the collection log
+make autonomous-uninstall     # stop and remove it
+```
+
+Options: `bash scripts/install_autonomous.sh --interval-min 30` for a different
+cadence, or `--no-wake` for **awake-only** (no sudo, no wake-ups; collects only
+while the Mac is awake).
+
+**How it works.** A launchd LaunchAgent runs `collect-once` every 20 min. Because
+a LaunchAgent can't run while the Mac sleeps, each run also arms the *next* wake
+(`pmset schedule wake`) so the Mac wakes itself, scrapes for ~30s, and sleeps
+again — a self-perpetuating chain that re-arms on any wake/login if broken.
+
+**One-time sudo.** Wake mode installs a **narrowly scoped** passwordless sudoers
+rule at `/etc/sudoers.d/futmarket-pmset` that permits *only* `pmset schedule
+wake`/`cancelall` — nothing else. `--no-wake` skips it entirely.
+
+**Honest caveats:**
+- **Powered off = no runs;** the chain re-arms at the next login/wake.
+- Waking every 20 min prevents deep sleep — a small power/thermal cost; on
+  **battery** macOS may defer wakes (Low Power Mode suppresses them). Best on AC.
+- Use the LaunchAgent **or** the dashboard's continuous mode, not both (harmless —
+  writes are idempotent — just redundant scraping).
+- If your `poll_minutes × skip_guard_fraction` is ≥ the interval, some runs skip
+  as "fresh" (the installer warns and tells you how to fix it). Data granularity
+  is unaffected — fut.gg backfills each card's full history on every hit.
+
+---
+
 ## Configuration
 
 Everything lives in `config.yaml` — nothing operational is hardcoded.

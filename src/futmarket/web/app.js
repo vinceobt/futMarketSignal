@@ -79,6 +79,7 @@
     app.appendChild(header());
     app.appendChild(controls());
     app.appendChild(scraperPanel());
+    app.appendChild(positionsPanel());
     app.appendChild(momentumPanel());
     app.appendChild(watchManager());
     app.appendChild(activityPanel());
@@ -98,12 +99,17 @@
     }).catch(function () {});
   }
   function afterAuth() {
-    refreshWatch(); refreshMomentum(); pollJobs();
+    refreshWatch(); refreshMomentum(); refreshPositions(); pollJobs();
     if (!state._poll) state._poll = setInterval(pollJobs, 1500);
   }
   function refreshMomentum() {
     api("GET", "/api/momentum").then(function (d) {
       state.momentum = d.players; state.momentumUpdated = d.updated_at; renderMomentum();
+    }).catch(function () {});
+  }
+  function refreshPositions() {
+    api("GET", "/api/positions").then(function (d) {
+      state.positions = d.positions; renderPositions();
     }).catch(function () {});
   }
   function refreshAll() { refreshData(); refreshWatch(); pollJobs(); }
@@ -190,6 +196,66 @@
     b.textContent = on ? "running" : "idle";
     document.getElementById("scr-info").textContent =
       "continuous mode " + (on ? "on — scraping every " + s.poll_minutes + " min" : "off");
+  }
+
+  // ---- rebound advisor: paper positions ----
+  function positionsPanel() {
+    var card = el("div", "card"); card.id = "positions";
+    var head = el("div", "cardhead");
+    head.appendChild(el("div", "ctitle", "Positions — rebound advisor"));
+    var run = el("button", "btn tiny primary", "Run advisor"); run.id = "adv-run";
+    run.style.marginLeft = "auto";
+    run.onclick = function () {
+      run.disabled = true;
+      api("POST", "/api/advise").then(function () { toast("Advisor running…"); })
+        .catch(function (e) { run.disabled = false; toast("Error: " + e.message, true); });
+    };
+    head.appendChild(run); card.appendChild(head);
+    card.appendChild(el("div", "muted mnote",
+      "Buys reliable rebounders near their floor, sells at target. Paper only — it alerts you, never trades."));
+    card.appendChild(el("div", "plist", "")).id = "pos-list";
+    return card;
+  }
+  function renderPositions() {
+    var box = document.getElementById("pos-list"); if (!box) return;
+    box.innerHTML = "";
+    var rows = state.positions || [];
+    var open = rows.filter(function (p) { return p.status === "open"; });
+    var closed = rows.filter(function (p) { return p.status === "closed"; });
+    if (!rows.length) { box.appendChild(el("div", "muted empty-sm", "No positions yet — the advisor opens one when a reliable rebounder hits its buy-zone.")); return; }
+    var t = el("table", "players mtable");
+    t.innerHTML = "<thead><tr><th>Player</th><th class='r'>Entry</th><th class='r'>Now</th>" +
+      "<th class='r'>P/L</th><th class='r'>Target</th></tr></thead>";
+    var body = el("tbody");
+    open.forEach(function (p) {
+      var tr = el("tr");
+      var up = (p.unrealized_pct || 0) >= 0;
+      tr.innerHTML =
+        "<td class='pname'>" + shortId(p.player_id) + "<div class='wmeta muted'>OPEN</div></td>" +
+        "<td class='r num'>" + fmtCoins(p.entry_price, true) + "</td>" +
+        "<td class='r num'>" + (p.current_price != null ? fmtCoins(p.current_price, true) : "–") + "</td>" +
+        "<td class='r num delta " + (up ? "up" : "down") + "'>" + (p.unrealized_pct != null ? fmtPct(p.unrealized_pct) : "–") + "</td>" +
+        "<td class='r num'>" + fmtCoins(p.target_price, true) + "</td>";
+      body.appendChild(tr);
+    });
+    closed.slice(0, 5).forEach(function (p) {
+      var tr = el("tr", "closedrow");
+      var up = (p.realized_pct || 0) >= 0;
+      tr.innerHTML =
+        "<td class='pname'>" + shortId(p.player_id) + "<div class='wmeta muted'>CLOSED</div></td>" +
+        "<td class='r num'>" + fmtCoins(p.entry_price, true) + "</td>" +
+        "<td class='r num'>" + (p.exit_price != null ? fmtCoins(p.exit_price, true) : "–") + "</td>" +
+        "<td class='r num delta " + (up ? "up" : "down") + "'>" + (p.realized_pct != null ? fmtPct(p.realized_pct) : "–") + "</td>" +
+        "<td class='r muted'>done</td>";
+      body.appendChild(tr);
+    });
+    t.appendChild(body); box.appendChild(t);
+  }
+  function shortId(id) {
+    // "239085-erling-haaland-26-184788461" -> "Erling Haaland"
+    var m = id.match(/^\d+-(.+?)-\d+-\d+$/);
+    if (!m) return id;
+    return m[1].split("-").map(function (w) { return w.charAt(0).toUpperCase() + w.slice(1); }).join(" ");
   }
 
   // ---- momentum scanner (market movers) ----
@@ -335,8 +401,12 @@
       // show live progress + log for the running job
       var cur = d.current || (d.jobs[0] && (d.jobs[0].status === "running") ? d.jobs[0].id : null);
       if (cur) showJobProgress(cur); else hideJobProgress();
-      // when work finishes, pull fresh data + watchlist + momentum once
-      if (state.lastRunning && !running) { refreshData(); refreshWatch(); refreshMomentum(); setMomBusy(false); }
+      // when work finishes, pull fresh data + watchlist + momentum + positions once
+      if (state.lastRunning && !running) {
+        refreshData(); refreshWatch(); refreshMomentum(); refreshPositions();
+        setMomBusy(false);
+        var ar = document.getElementById("adv-run"); if (ar) ar.disabled = false;
+      }
       state.lastRunning = running;
     }).catch(function () {});
   }

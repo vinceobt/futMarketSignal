@@ -172,6 +172,10 @@ table.players tbody tr.sel td.pname { box-shadow: inset 3px 0 0 var(--price); }
 .wmeta { font-size: 11.5px; }
 .empty-sm { font-size: 13px; padding: 10px 0; }
 
+/* positions */
+#positions .plist { overflow-x: auto; }
+.closedrow { opacity: 0.6; }
+
 /* momentum scanner */
 .mupd { font-size: 11.5px; margin-left: 8px; }
 .mnote { font-size: 11.5px; margin-bottom: 10px; }

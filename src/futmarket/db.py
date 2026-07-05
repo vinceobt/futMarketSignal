@@ -95,6 +95,24 @@ CREATE TABLE IF NOT EXISTS momentum (
   rarity     TEXT
 );
 
+-- Paper positions opened by the rebound advisor. One open row per player at a
+-- time; this both de-dupes alerts (no repeat BUY while holding) and remembers the
+-- entry price so the SELL target can be computed. Never a real trade.
+CREATE TABLE IF NOT EXISTS positions (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  player_id     TEXT NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'open',   -- open | closed
+  entry_price   INTEGER NOT NULL,
+  entry_ts      DATETIME NOT NULL,
+  target_price  INTEGER NOT NULL,
+  stop_price    INTEGER,
+  floor_price   INTEGER,
+  exit_price    INTEGER,
+  exit_ts       DATETIME,
+  realized_pct  REAL,
+  reason        TEXT
+);
+
 -- Background jobs triggered from the dashboard (scrape passes, backtests, …).
 -- The web layer enqueues rows here; the worker thread runs them and updates
 -- status/progress/result so the UI can poll.
@@ -232,6 +250,45 @@ def momentum_list(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT rank, player_id, name, url, price, momentum, rating, position, "
         "rarity FROM momentum ORDER BY rank").fetchall()
+
+
+# ---- paper positions (rebound advisor) ----
+
+def position_open(conn: sqlite3.Connection, *, player_id: str, entry_price: int,
+                  entry_ts: datetime, target_price: int, stop_price: int | None,
+                  floor_price: int | None, reason: str) -> int:
+    cur = conn.execute(
+        "INSERT INTO positions (player_id, status, entry_price, entry_ts, "
+        "target_price, stop_price, floor_price, reason) "
+        "VALUES (?, 'open', ?, ?, ?, ?, ?, ?)",
+        (player_id, int(entry_price), bucket_timestamp(entry_ts), int(target_price),
+         stop_price, floor_price, reason))
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def position_close(conn: sqlite3.Connection, position_id: int, *, exit_price: int,
+                   exit_ts: datetime, realized_pct: float, reason: str) -> None:
+    conn.execute(
+        "UPDATE positions SET status='closed', exit_price=?, exit_ts=?, "
+        "realized_pct=?, reason=? WHERE id=?",
+        (int(exit_price), bucket_timestamp(exit_ts), realized_pct, reason, position_id))
+    conn.commit()
+
+
+def position_get_open(conn: sqlite3.Connection, player_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM positions WHERE player_id=? AND status='open' "
+        "ORDER BY id DESC LIMIT 1", (player_id,)).fetchone()
+
+
+def positions_list(conn: sqlite3.Connection, status: str | None = None,
+                   limit: int = 100) -> list[sqlite3.Row]:
+    if status:
+        return conn.execute("SELECT * FROM positions WHERE status=? "
+                            "ORDER BY id DESC LIMIT ?", (status, limit)).fetchall()
+    return conn.execute("SELECT * FROM positions ORDER BY id DESC LIMIT ?",
+                        (limit,)).fetchall()
 
 
 def bucket_timestamp(dt: datetime) -> str:

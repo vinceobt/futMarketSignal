@@ -31,6 +31,29 @@ def format_realtime(a: Alert) -> str:
             f"(confidence {a.confidence:.0%})")
 
 
+def _coins(n) -> str:
+    n = float(n)
+    if abs(n) >= 1e6:
+        return f"{n / 1e6:.2f}M"
+    if abs(n) >= 1e3:
+        return f"{round(n / 1e3)}K"
+    return str(round(n))
+
+
+def format_trade_alert(kind: str, name: str, price: int, *, view=None,
+                       target: int | None = None, realized_pct: float | None = None,
+                       reason: str = "") -> str:
+    """One-line BUY/SELL message for the rebound advisor (Discord/console)."""
+    if kind == "BUY":
+        floor = f"~{_coins(view.floor)}" if view and view.floor else "its floor"
+        tgt = f" → target {_coins(target)}" if target else ""
+        return (f"🟢 BUY {name} @ {_coins(price)} — bounced off {floor} "
+                f"{getattr(view, 'bounces', '?')}× in-range{tgt}")
+    # SELL
+    pnl = f" ({realized_pct:+.1f}% net)" if realized_pct is not None else ""
+    return f"🔴 SELL {name} @ {_coins(price)}{pnl} — {reason}"
+
+
 def format_digest(alerts: list[Alert], date_str: str) -> str:
     if not alerts:
         return f"FUT digest {date_str}: nothing actionable — all HOLD."

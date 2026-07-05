@@ -78,10 +78,30 @@ class Config:
     webhook_url: str | None = None
     # Momentum scanner: how many top movers to pull from fut.gg per refresh.
     momentum_limit: int = 30
+    # Rebound strategy (the autonomous advisor).
+    strategy_window_days: int = 30
+    strategy_min_bounces: int = 3
+    strategy_buy_zone_pct: float = 3.0
+    strategy_sell_mode: str = "target"
+    strategy_target_pct: float = 25.0
+    strategy_resistance_pctile: float = 80.0
+    strategy_stop_pct: float = 8.0
+    strategy_floor_drift_pct: float = 10.0
+    strategy_momentum_screen_limit: int = 8  # movers to scrape+screen per cycle; 0 = watchlist only
 
 
 class ConfigError(ValueError):
     pass
+
+
+VALID_SELL_MODES = {"target", "resistance"}
+
+
+def _valid_sell_mode(v) -> str:
+    mode = str(v)
+    if mode not in VALID_SELL_MODES:
+        raise ConfigError(f"strategy.sell_mode must be one of {sorted(VALID_SELL_MODES)}, got {mode!r}")
+    return mode
 
 
 def load_config(path: str | Path) -> Config:
@@ -91,6 +111,7 @@ def load_config(path: str | Path) -> Config:
     raw = yaml.safe_load(path.read_text()) or {}
     signals_cfg = raw.get("signals") or {}
     alerts_cfg = raw.get("alerts") or {}
+    strategy_cfg = raw.get("strategy") or {}
 
     source = raw.get("source", "manual")
     if source not in VALID_SOURCES:
@@ -158,4 +179,13 @@ def load_config(path: str | Path) -> Config:
         alert_destination=str(alerts_cfg.get("destination", "console")),
         webhook_url=alerts_cfg.get("webhook_url") or None,
         momentum_limit=int(raw.get("momentum_limit", 30)),
+        strategy_window_days=int(strategy_cfg.get("window_days", 30)),
+        strategy_min_bounces=int(strategy_cfg.get("min_bounces", 3)),
+        strategy_buy_zone_pct=float(strategy_cfg.get("buy_zone_pct", 3.0)),
+        strategy_sell_mode=_valid_sell_mode(strategy_cfg.get("sell_mode", "target")),
+        strategy_target_pct=float(strategy_cfg.get("target_pct", 25.0)),
+        strategy_resistance_pctile=float(strategy_cfg.get("resistance_pctile", 80.0)),
+        strategy_stop_pct=float(strategy_cfg.get("stop_pct", 8.0)),
+        strategy_floor_drift_pct=float(strategy_cfg.get("floor_drift_pct", 10.0)),
+        strategy_momentum_screen_limit=int(strategy_cfg.get("momentum_screen_limit", 8)),
     )

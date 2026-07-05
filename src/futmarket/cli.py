@@ -231,6 +231,62 @@ def cmd_momentum(args) -> None:
               f"{str(rtg):>3} {r['position']:<3} {r['price']:>9,}  {r['player_id']}")
 
 
+def cmd_advise(args) -> None:
+    from .services import advisor
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    source = _resolve_source(conn, args.source)
+    res = advisor.run(conn, config, source, dry_run=args.dry_run)
+    tag = "would " if args.dry_run else ""
+    for o in res["opened"]:
+        print(f"{tag}BUY  {o['msg']}")
+    for c in res["closed"]:
+        print(f"{tag}SELL {c['msg']}")
+    print(f"\nscreened {res['screened']} players · "
+          f"{tag}opened {len(res['opened'])} · {tag}closed {len(res['closed'])} · "
+          f"holding {len(res['holding'])}")
+    if not res["opened"] and not res["closed"]:
+        print("no BUY/SELL triggers this pass.")
+
+
+def cmd_scan_momentum(args) -> None:
+    from .services import scanner
+    from . import alerts as alertmod
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    source = _resolve_source(conn, args.source)
+    alerter = None if args.dry_run else alertmod.get_alerter(config)
+    print(f"scanning fut.gg momentum for new range-bound cards "
+          f"(up to {config.strategy_momentum_screen_limit})…")
+    res = scanner.scan(conn, config, source, add=not args.dry_run, alerter=alerter)
+    if res["added"]:
+        print(f"tracking {len(res['added'])} new (at their floor now): {', '.join(res['added'])}")
+    waiting = [n for n in res["reliable"] if n not in res["added"]]
+    if waiting:
+        note = "dry-run" if args.dry_run else "reliable but above buy-zone — will add on a dip"
+        print(f"watching {len(waiting)} for a dip ({note}): {', '.join(waiting)}")
+    print(f"\nscanned {res['scanned']} untracked movers · "
+          f"reliable {len(res['reliable'])} · added {len(res['added'])}")
+
+
+def cmd_positions(args) -> None:
+    config = _load(args)
+    conn = db.connect(config.database_path)
+    rows = db.positions_list(conn, status=args.status)
+    if not rows:
+        print("no positions yet.")
+        return
+    for r in rows:
+        if r["status"] == "open":
+            print(f"OPEN   {r['player_id']:<40} entry {r['entry_price']:>9,}  "
+                  f"target {r['target_price']:>9,}  since {r['entry_ts']}")
+        else:
+            print(f"CLOSED {r['player_id']:<40} entry {r['entry_price']:>9,}  "
+                  f"exit {r['exit_price'] or 0:>9,}  {r['realized_pct']:+.1f}%  {r['reason']}")
+
+
 def cmd_log_event(args) -> None:
     config = _load(args)
     setup_logging(config.log_path)
@@ -259,11 +315,14 @@ def _latest_features_by_player(conn, config, source):
 def cmd_backtest(args) -> None:
     from . import backtest, features
     from .signals import SignalParams
+    from .strategy import StrategyParams
     config = _load(args)
     conn = db.connect(config.database_path)
     source = _resolve_source(conn, args.source)
     tax = args.tax if args.tax is not None else config.tax_rate
     params = SignalParams.from_config(config)
+    strat_params = StrategyParams.from_config(config)
+    use_rebound = args.strategy == "rebound"
 
     targets = ([_watchlist_entry(conn, config, args.player_id)] if args.player_id
                else list(watch.effective_entries(conn, config)))
@@ -273,7 +332,11 @@ def cmd_backtest(args) -> None:
         if len(table) < 2:
             continue
         any_output = True
-        cmp = backtest.evaluate_rule(table, params, tax)
+        if use_rebound:
+            series = features.to_series(db.snapshots(conn, entry.player_id, source))
+            cmp = backtest.evaluate_rebound(table, series, strat_params)
+        else:
+            cmp = backtest.evaluate_rule(table, params, tax)
         print(f"\n{entry.name} ({entry.player_id})  source={source}  "
               f"snapshots={len(table)}  tax={tax:.0%}")
         header = f"  {'strategy':<16}{'trades':>7}{'hit%':>7}{'avg/trade':>11}{'total':>9}{'maxDD':>8}"
@@ -282,8 +345,12 @@ def cmd_backtest(args) -> None:
             print(f"  {r.label:<16}{r.n_trades:>7}{r.hit_rate*100:>6.0f}%"
                   f"{r.avg_trade_return*100:>10.1f}%{r.total_return*100:>8.1f}%"
                   f"{r.max_drawdown*100:>7.1f}%")
-        verdict = "PROMOTE — beats every baseline" if cmp.beats_baselines else \
-                  "DO NOT PROMOTE — fails to beat a baseline"
+        if cmp.candidate.n_trades == 0:
+            verdict = "NO TRADES — strategy found no qualifying setups (stayed flat)"
+        elif cmp.beats_baselines:
+            verdict = "PROMOTE — beats every baseline"
+        else:
+            verdict = "DO NOT PROMOTE — fails to beat a baseline"
         print(f"  -> {verdict}")
     if not any_output:
         print(f"not enough history in source={source!r} to backtest "
@@ -454,11 +521,28 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--notes", default=None)
     p.set_defaults(func=cmd_log_event)
 
-    p = sub.add_parser("backtest", help="replay the signal rule vs naive baselines")
+    p = sub.add_parser("backtest", help="replay a strategy vs naive baselines")
     p.add_argument("player_id", nargs="?", default=None, help="one player, or omit for all")
     p.add_argument("--source", default=None)
     p.add_argument("--tax", type=float, default=None, help="sell tax (default: config tax_rate)")
+    p.add_argument("--strategy", choices=["zscore", "rebound"], default="zscore",
+                   help="which strategy to score (default: zscore)")
     p.set_defaults(func=cmd_backtest)
+
+    p = sub.add_parser("advise", help="run the rebound advisor: analyze, manage positions, alert")
+    p.add_argument("--source", default=None)
+    p.add_argument("--dry-run", action="store_true",
+                   help="print intended BUY/SELL without writing positions or sending alerts")
+    p.set_defaults(func=cmd_advise)
+
+    p = sub.add_parser("positions", help="list paper positions opened by the advisor")
+    p.add_argument("--status", choices=["open", "closed"], default=None)
+    p.set_defaults(func=cmd_positions)
+
+    p = sub.add_parser("scan-momentum", help="discover + track new range-bound cards from fut.gg momentum")
+    p.add_argument("--source", default=None)
+    p.add_argument("--dry-run", action="store_true", help="report finds without adding them")
+    p.set_defaults(func=cmd_scan_momentum)
 
     p = sub.add_parser("signals", help="evaluate + store current BUY/SELL/HOLD signals")
     p.add_argument("--source", default=None)

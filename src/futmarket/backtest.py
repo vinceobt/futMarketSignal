@@ -18,8 +18,11 @@ import random
 from dataclasses import dataclass, field
 from typing import Callable
 
+import pandas as pd
+
 from .features import FeatureRow
 from .signals import BUY, HOLD, SELL, SignalParams, evaluate
+from . import strategy as strat
 
 Decider = Callable[[FeatureRow], str]
 
@@ -85,6 +88,60 @@ def run_backtest(features: list[FeatureRow], decide: Decider,
 def rule_decider(params: SignalParams) -> Decider:
     """The live rule, as a backtest decider — same code path as Phase 3."""
     return lambda f: evaluate(f, params).signal_type
+
+
+def run_rebound_backtest(features: list[FeatureRow], series: "pd.Series",
+                         params: "strat.StrategyParams",
+                         label: str = "rebound") -> BacktestResult:
+    """Position-aware backtest of the rebound strategy. Same equity/tax/drawdown
+    accounting as run_backtest, but the SELL check needs the entry price (the
+    plain Decider only sees the current row), so the loop lives here and calls
+    strategy.analyze on the trailing window at each step — exactly what the live
+    advisor does, so backtest and live never diverge."""
+    tax_rate = params.tax_rate
+    cash, units, entry, entry_ctx = 1.0, 0.0, 0.0, None
+    peak, max_dd = 1.0, 0.0
+    trades: list[Trade] = []
+
+    for f in features:
+        price = f.price
+        at = pd.Timestamp(f.timestamp)
+        view = strat.analyze(series, at, params)
+
+        if units == 0.0 and cash > 0.0 and strat.should_buy(view):
+            units, cash, entry, entry_ctx = cash / price, 0.0, float(price), (f.timestamp, price)
+        elif units > 0.0:
+            sell, _ = strat.should_sell(price, entry, view.floor, view.ceiling, params)
+            if sell:
+                proceeds = units * price * (1.0 - tax_rate)
+                ret = proceeds / (units * entry_ctx[1]) - 1.0
+                trades.append(Trade(entry_ctx[0], entry_ctx[1], f.timestamp, price, ret))
+                cash, units, entry, entry_ctx = proceeds, 0.0, 0.0, None
+
+        equity = cash + units * price
+        peak = max(peak, equity)
+        max_dd = max(max_dd, (peak - equity) / peak)
+
+    ending_equity = cash + (units * features[-1].price if units > 0 else 0.0)
+    wins = sum(1 for t in trades if t.ret > 0)
+    n = len(trades)
+    return BacktestResult(
+        label=label, n_trades=n,
+        hit_rate=(wins / n) if n else 0.0,
+        avg_trade_return=(sum(t.ret for t in trades) / n) if n else 0.0,
+        total_return=ending_equity - 1.0, max_drawdown=max_dd,
+        ending_equity=ending_equity, trades=trades)
+
+
+def evaluate_rebound(features: list[FeatureRow], series: "pd.Series",
+                     params: "strat.StrategyParams") -> Comparison:
+    """Score the rebound strategy vs the naive baselines on the same series."""
+    candidate = run_rebound_backtest(features, series, params, label="rebound")
+    return Comparison(
+        candidate=candidate,
+        baselines=[buy_and_hold(features, params.tax_rate),
+                   random_baseline(features, params.tax_rate)],
+    )
 
 
 def buy_and_hold(features: list[FeatureRow], tax_rate: float = 0.05) -> BacktestResult:

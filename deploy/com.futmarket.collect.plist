@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- FUT Market Desk autonomous collector. Placeholders filled by install_autonomous.sh.
+     Runs the wrapper every __INTERVAL_SEC__ seconds while awake and once on each
+     wake/login; the wrapper arms the next pmset wake so this fires through sleep. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.futmarket.collect</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO__/data/.autonomous_collect.rendered.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <key>StartInterval</key>
+  <integer>__INTERVAL_SEC__</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__REPO__/data/autonomous.out</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO__/data/autonomous.err</string>
+</dict>
+</plist>

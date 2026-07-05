@@ -12,7 +12,8 @@ PORT ?= 8000
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install dashboard serve collect backtest signals players build-features test clean
+.PHONY: help install dashboard serve collect backtest signals players build-features test clean \
+        autonomous-install autonomous-uninstall autonomous-status autonomous-log
 
 help: ## Show this help
 	@echo "FUT Market Desk — make targets:"
@@ -49,3 +50,19 @@ test: ## Run the test suite
 
 clean: ## Remove caches (keeps data/ and the DB)
 	rm -rf .pytest_cache **/__pycache__ src/**/__pycache__
+
+autonomous-install: ## Collect 3x/hour (waking the Mac) + scan momentum every 6h (macOS)
+	bash scripts/install_autonomous.sh
+
+autonomous-uninstall: ## Stop and remove both autonomous agents
+	bash scripts/uninstall_autonomous.sh
+
+autonomous-status: ## Show whether the autonomous agents are loaded + next wake
+	@echo "--- collector ---"; launchctl print gui/$$(id -u)/com.futmarket.collect 2>/dev/null | grep -E "state|run interval" || echo "not loaded"
+	@echo "--- scanner ---"; launchctl print gui/$$(id -u)/com.futmarket.scan 2>/dev/null | grep -E "state|run interval" || echo "not loaded"
+	@echo "--- scheduled power events ---"; pmset -g sched
+	@echo "--- recent collect log ---"; tail -n 4 data/autonomous.log 2>/dev/null || echo "(no log yet)"
+	@echo "--- recent scan log ---"; tail -n 3 data/scan.log 2>/dev/null || echo "(no scan log yet)"
+
+autonomous-log: ## Follow the autonomous collector log
+	tail -f data/autonomous.log

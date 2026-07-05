@@ -42,12 +42,27 @@ signals:
                         # (on coarse/daily history it tends to over-block dip-buys).
   tax_rate: 0.05        # EA transfer-market sell tax, used in backtest P&L
 
+# Rebound strategy — the autonomous advisor. Buys cards that reliably bounce off a
+# floor, sells at a fixed net-of-tax profit target. Backtest it (`futmarket
+# backtest --strategy rebound`) before trusting the alerts.
+strategy:
+  window_days: 30           # how much history defines the floor + counts bounces
+  min_bounces: 3            # rebounds in that window to qualify as a reliable bouncer
+  buy_zone_pct: 3           # "near the floor" = current price within this % of the floor
+  sell_mode: target         # "target" = sell at a fixed % profit; "resistance" = ride to the ceiling
+  target_pct: 25            # target mode: SELL when up this % net of the 5% tax vs the buy price
+  resistance_pctile: 80     # resistance mode: the ceiling = this percentile of the range's prices
+  stop_pct: 8               # SELL (bail) if price falls this % below the floor; 0 = no stop
+  floor_drift_pct: 10       # reject as a downtrend only if rebound-troughs keep dropping >this%
+                            # (the launch crash is ignored — only the bounce lows are judged)
+  momentum_screen_limit: 8  # also screen this many fut.gg momentum movers/cycle; 0 = watchlist only
+
 # Where signals go. destination: console (default) or discord.
 # For discord, paste an incoming-webhook URL — sending publishes externally, so
 # it stays console until you set this deliberately.
 alerts:
-  destination: console
-  webhook_url: null
+  destination: discord
+  webhook_url: REDACTED
   min_confidence: 0.6   # realtime mode only pushes signals at/above this confidence
 
 # Watchlist: just paste the fut.gg player URL for each card you want to track.
