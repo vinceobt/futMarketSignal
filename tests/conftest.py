@@ -20,9 +20,9 @@ def config(tmp_path):
         database_path: data/test.db
         log_path: data/test.log
         watchlist:
-          - { player_id: p1, name: "Player One", rating: 88, position: ST, version: "Base Gold" }
-          - { player_id: p2, name: "Player Two", rating: 90, position: CM, version: "Base Gold" }
-          - { player_id: p3, name: "Player Three", rating: 85, position: CB, version: "Base Gold" }
+          - https://www.fut.gg/players/1-player-one/26-1/
+          - https://www.fut.gg/players/2-player-two/26-2/
+          - https://www.fut.gg/players/3-player-three/26-3/
     """))
     return load_config(cfg)
 

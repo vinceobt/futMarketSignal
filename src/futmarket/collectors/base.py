@@ -24,6 +24,18 @@ class PriceQuote:
     price: int
     source: str
     fetched_at: datetime
+    # Optional metadata a source may enrich by reading the player's page. When a
+    # source can't determine these it leaves them None and the scheduler falls
+    # back to the URL-derived values on the WatchlistEntry.
+    name: str | None = None
+    rating: int | None = None
+    version: str | None = None
+    # The card's full market price history as (timestamp, price) points, oldest
+    # first — everything the source could read off the player's profile in one
+    # shot (daily since release, hourly for the recent day). Empty for sources
+    # that only expose a single current price. The scheduler backfills all of
+    # these; UNIQUE(player_id, source, minute) makes re-fetches idempotent.
+    history: tuple[tuple[datetime, int], ...] = ()
 
 
 class PriceSource(Protocol):

@@ -24,7 +24,9 @@ class MockSource:
 
     def fetch_price(self, player: WatchlistEntry, platform: str) -> PriceQuote:
         now = datetime.now(timezone.utc)
-        base = 1000 * player.rating  # 89-rated ≈ 89k: close enough for plumbing
+        # Stable per-player base in ~[500, 150000], derived from the id so the
+        # pipeline has plausible prices without any rating on the watchlist.
+        base = 500 + (abs(_noise(player.player_id)) * 149_500)
         hour_bucket = now.strftime("%Y-%m-%dT%H")
         drift = _noise(f"{player.player_id}:{hour_bucket}") * 0.08
         price = max(200, int(base * (1 + drift)))

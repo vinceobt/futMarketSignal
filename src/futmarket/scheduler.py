@@ -27,18 +27,37 @@ class PassResult:
     skipped_fresh: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     aborted_by_breaker: bool = False
+    stopped: bool = False
 
 
 def run_pass(config: Config, conn, source: PriceSource,
-             sleep=time.sleep, now=None) -> PassResult:
+             sleep=time.sleep, now=None, should_stop=None,
+             only_player_id=None, on_progress=None) -> PassResult:
     """One polite sequential pass over the watchlist. Never raises for a single
-    player's failure; trips the breaker after max_consecutive_failures in a row."""
+    player's failure; trips the breaker after max_consecutive_failures in a row.
+
+    should_stop:     optional zero-arg callable; checked before each player so a
+                     UI/worker can cancel cleanly between (never mid-) fetches.
+    only_player_id:  restrict the pass to a single watchlist player (used by the
+                     "scrape one" / add-link-then-enrich flow).
+    on_progress:     optional callback(done:int, total:int, player) for live UI.
+    """
     result = PassResult()
     guard = timedelta(minutes=config.poll_minutes * config.skip_guard_fraction)
     consecutive_failures = 0
     lo, hi = config.inter_player_delay_seconds
 
-    for i, player in enumerate(config.watchlist):
+    from .services import watch
+    players = [p for p in watch.effective_entries(conn, config)
+               if only_player_id is None or p.player_id == only_player_id]
+    total = len(players)
+    for i, player in enumerate(players):
+        if should_stop is not None and should_stop():
+            log.info("pass stopped by request after %d/%d players", i, total)
+            result.stopped = True
+            break
+        if on_progress is not None:
+            on_progress(i, total, player)
         current = now() if now else datetime.now(timezone.utc)
 
         last = db.latest_snapshot_time(conn, player.player_id, source.name)
@@ -66,19 +85,31 @@ def run_pass(config: Config, conn, source: PriceSource,
             continue
 
         consecutive_failures = 0
-        db.upsert_player(conn, player_id=player.player_id, name=player.name,
-                         rating=player.rating, position=player.position,
-                         version=player.version, platform=config.platform)
-        inserted = db.insert_snapshot(conn, player_id=quote.player_id,
-                                      price=quote.price, source=quote.source,
-                                      at=quote.fetched_at)
+        # Prefer metadata the source enriched from the page; fall back to the
+        # values derived from the watchlist URL.
+        db.upsert_player(conn, player_id=player.player_id,
+                         name=quote.name or player.name,
+                         rating=quote.rating if quote.rating is not None else player.rating,
+                         position=player.position,
+                         version=quote.version or player.version,
+                         platform=config.platform)
+        # Backfill the card's full market history (idempotent — existing points
+        # are ignored), then record the live price at the moment of fetch.
+        new_points = 0
+        for at, price in quote.history:
+            if db.insert_snapshot(conn, player_id=quote.player_id, price=price,
+                                  source=quote.source, at=at):
+                new_points += 1
+        if db.insert_snapshot(conn, player_id=quote.player_id, price=quote.price,
+                              source=quote.source, at=quote.fetched_at):
+            new_points += 1
         conn.commit()
-        if inserted:
-            log.info("collect player=%s price=%d source=%s",
-                     player.player_id, quote.price, quote.source)
+        if new_points:
+            log.info("collect player=%s new_points=%d latest=%d source=%s",
+                     player.player_id, new_points, quote.price, quote.source)
             result.collected.append(player.player_id)
         else:
-            log.info("skip player=%s reason=duplicate-minute", player.player_id)
+            log.info("skip player=%s reason=nothing-new", player.player_id)
             result.skipped_fresh.append(player.player_id)
 
     log.info("pass done collected=%d skipped=%d failed=%d breaker=%s",
@@ -113,8 +144,14 @@ def run_forever(config: Config) -> None:
             state["cooldown_until"] = (datetime.now(timezone.utc)
                                        + timedelta(minutes=config.cooldown_minutes))
 
+    from .services import watch
+    conn0 = db.connect(config.database_path)
+    try:
+        n_watch = len(watch.effective_entries(conn0, config))  # also seeds on first run
+    finally:
+        conn0.close()
     scheduler.add_job(job, "interval", minutes=config.poll_minutes,
                       jitter=120, next_run_time=datetime.now(timezone.utc))
     log.info("scheduler started source=%s interval=%dmin watchlist=%d",
-             config.source, config.poll_minutes, len(config.watchlist))
+             config.source, config.poll_minutes, n_watch)
     scheduler.start()

@@ -8,12 +8,14 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "PyYAML>=6.0",
     "APScheduler>=3.10",
+    "pandas>=2.0",
     "patchright",
     "camoufox[geoip]",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+web = ["fastapi>=0.110", "uvicorn>=0.27"]
 
 [project.scripts]
 futmarket = "futmarket.cli:main"
@@ -24,6 +26,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+futmarket = ["web/*.html", "web/*.css", "web/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -33,7 +33,7 @@ def test_config_rejects_oversized_watchlist(tmp_path):
     import pytest
     from futmarket.config import ConfigError, load_config
     entries = "\n".join(
-        f'  - {{ player_id: p{i}, name: "P{i}", rating: 80, position: ST, version: "Base Gold" }}'
+        f'  - https://www.fut.gg/players/{i}-p{i}/26-{i}/'
         for i in range(51)
     )
     cfg = tmp_path / "big.yaml"

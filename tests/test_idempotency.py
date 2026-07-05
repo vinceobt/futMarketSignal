@@ -72,15 +72,18 @@ def test_circuit_breaker_aborts_pass(config, conn):
 
 
 def test_single_failure_does_not_stop_others(config, conn):
-    class FlakyForP2(FixedSource):
+    ids = [e.player_id for e in config.watchlist]
+    flaky_id = ids[1]
+
+    class FlakyForOne(FixedSource):
         name = "flaky"
 
         def fetch_price(self, player, platform):
-            if player.player_id == "p2":
+            if player.player_id == flaky_id:
                 raise SourceError("timeout")
             return super().fetch_price(player, platform)
 
-    result = run_pass(config, conn, FlakyForP2(), sleep=lambda s: None)
-    assert result.failed == ["p2"]
-    assert sorted(result.collected) == ["p1", "p3"]
+    result = run_pass(config, conn, FlakyForOne(), sleep=lambda s: None)
+    assert result.failed == [flaky_id]
+    assert sorted(result.collected) == sorted([ids[0], ids[2]])
     assert not result.aborted_by_breaker
