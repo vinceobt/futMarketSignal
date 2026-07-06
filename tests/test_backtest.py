@@ -1,10 +1,14 @@
 """Backtest P&L math, spot-checked by hand (Phase 2 DoD)."""
 
+import math
+
+import pandas as pd
 import pytest
 
 from futmarket import backtest as B
 from futmarket.features import FeatureRow
-from futmarket.signals import BUY, HOLD, SELL, SignalParams
+from futmarket.signals import BUY, HOLD, SELL
+from futmarket.strategy import StrategyParams
 
 
 def _f(ts, price, z=None, days=None, ev=None):
@@ -51,25 +55,45 @@ def test_no_double_buy_and_open_position_marked_at_end():
     assert r.ending_equity == pytest.approx(1.2)  # 1 unit cash -> 0.01 units @120
 
 
-def test_rule_decider_matches_live_signal_engine():
-    params = SignalParams(buy_z=-1.5, sell_z=1.5, event_guard_days=2)
-    decide = B.rule_decider(params)
-    assert decide(_f("t", 100, z=-2.0)) == BUY
-    assert decide(_f("t", 100, z=2.0)) == SELL
-    assert decide(_f("t", 100, z=0.0)) == HOLD
-    # imminent SBC suppresses the BUY
-    assert decide(_f("t", 100, z=-2.0, days=1, ev="SBC")) == HOLD
+def _res(total_return, max_drawdown, label="x"):
+    return B.BacktestResult(label=label, n_trades=1, hit_rate=1.0,
+                            avg_trade_return=total_return, total_return=total_return,
+                            max_drawdown=max_drawdown, ending_equity=1 + total_return)
 
 
-def test_candidate_beats_baselines_on_mean_reverting_series():
-    # sawtooth: cheap (z<<0) then rich (z>>0), repeated. The z-rule should
-    # buy the dips and sell the peaks; buy-and-hold ends flat.
-    feats = []
-    for i in range(6):
-        feats.append(_f(f"lo{i}", 80, z=-2.0))
-        feats.append(_f(f"hi{i}", 120, z=2.0))
-    params = SignalParams()
-    cmp = B.evaluate_rule(feats, params, tax_rate=0.05)
-    assert cmp.candidate.n_trades >= 3
-    assert cmp.candidate.total_return > 0
-    assert cmp.beats_baselines
+def test_promotion_requires_beating_every_baseline_return():
+    cmp = B.Comparison(candidate=_res(0.10, 0.05),
+                       baselines=[_res(0.20, 0.30), _res(-0.05, 0.40)])
+    assert not cmp.promote()
+
+
+def test_promotion_rejects_higher_return_bought_with_worse_drawdown():
+    # beats both baselines on return, but its drawdown is 3x the worst baseline's
+    cmp = B.Comparison(candidate=_res(0.50, 0.90),
+                       baselines=[_res(0.20, 0.30), _res(-0.05, 0.25)])
+    assert not cmp.promote(1.0)
+    assert cmp.promote(4.0)  # a looser dd multiple admits it
+
+
+def test_promotion_accepts_better_return_and_drawdown():
+    cmp = B.Comparison(candidate=_res(0.50, 0.10),
+                       baselines=[_res(0.20, 0.30), _res(-0.05, 0.25)])
+    assert cmp.promote()
+    assert cmp.beats_baselines  # alias with dd_multiple=1.0
+
+
+def test_rebound_backtest_trades_the_unified_engine():
+    # a clean wide sawtooth: decide() should buy troughs and exit on target/
+    # resistance, ending positive with at least one round trip
+    n, cycles, lo, hi = 300, 8, 40_000, 55_000
+    prices = [lo + (hi - lo) * (0.5 - 0.5 * math.cos(i / (n / cycles) * 2 * math.pi))
+              for i in range(n)]
+    idx = pd.date_range("2026-05-01", periods=n, freq="6h", tz="UTC")
+    series = pd.Series([float(p) for p in prices], index=idx)
+    feats = [_f(ts.strftime("%Y-%m-%dT%H:%M:%SZ"), int(p))
+             for ts, p in series.items()]
+    params = StrategyParams(window_days=30, min_bounces=2, buy_zone_pct=4,
+                            target_pct=12, stop_pct=0)
+    r = B.run_rebound_backtest(feats, series, params)
+    assert r.n_trades >= 1
+    assert r.total_return > 0

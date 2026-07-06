@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS signals (
   signal_id     INTEGER PRIMARY KEY AUTOINCREMENT,
   player_id     TEXT REFERENCES players(player_id),
   timestamp     DATETIME NOT NULL,
-  signal_type   TEXT NOT NULL,
+  signal_type   TEXT NOT NULL,   -- BUY | SELL | HOLD (holding, no exit) | SKIP (gates failed)
   confidence    REAL,
   reason        TEXT
 );

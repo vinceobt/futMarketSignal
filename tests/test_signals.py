@@ -1,93 +1,82 @@
-"""Signal rule decisions + human-readable reason strings (Phase 3 DoD)."""
+"""The unified decide() vocabulary: BUY/SELL/HOLD/SKIP actions, the event
+guard, confidence, and the alert formatting built on top of them."""
+
+import math
+
+import pandas as pd
 
 from futmarket.alerts import Alert, format_digest, format_realtime
-from futmarket.features import FeatureRow
-from futmarket.signals import BUY, HOLD, SELL, SignalParams, evaluate
+from futmarket.signals import BUY, HOLD, SELL, SKIP
+from futmarket.strategy import (EVENT_IMMINENT, NOT_NEAR_FLOOR, StrategyParams,
+                                decide, target_price)
 
 
-def _f(price, z=None, mean=None, days=None, ev=None, mom=None):
-    return FeatureRow(
-        player_id="p", source="test", timestamp="t", price=price,
-        pct_change_1h=None, pct_change_24h=mom, pct_change_7d=None,
-        rolling_mean_24h=mean, rolling_std_24h=None, z_score=z,
-        days_to_next_event=days, next_event_type=ev, is_weekend_window=0,
-    )
+def _series(prices, start="2026-05-01", freq="6h"):
+    idx = pd.date_range(start, periods=len(prices), freq=freq, tz="UTC")
+    return pd.Series([float(p) for p in prices], index=idx)
 
 
-# momentum guard on (5% 24h) for the confirmation tests
-PARAMS = SignalParams(buy_z=-1.5, sell_z=1.5, event_guard_days=2, momentum_guard_pct=5.0)
+def _sawtooth(cycles=8, n=300, lo=40_000, hi=55_000):
+    return [lo + (hi - lo) * (0.5 - 0.5 * math.cos(i / (n / cycles) * 2 * math.pi))
+            for i in range(n)]
 
 
-def test_buy_when_cheap_and_no_event():
-    s = evaluate(_f(80_000, z=-1.8, mean=92_000), PARAMS)
-    assert s.signal_type == BUY
-    assert "below its 24h average" in s.reason
-    assert "92,000" in s.reason and "80,000" in s.reason  # real feature values
-    assert 0 < s.confidence <= 1
+PARAMS = StrategyParams(window_days=30, min_bounces=2, buy_zone_pct=4,
+                        target_pct=12, stop_pct=0)
+BUY_SERIES = _series(_sawtooth())  # ends on a trough of a validated range
+
+
+def test_buy_ready_series_is_a_buy():
+    d = decide(BUY_SERIES, BUY_SERIES.index[-1], PARAMS)
+    assert d.action == BUY
+    assert 0 < d.confidence <= 1
+    assert "floor" in d.detail and "after tax" in d.detail
 
 
 def test_buy_suppressed_by_imminent_crashing_event():
-    s = evaluate(_f(80_000, z=-1.8, mean=92_000, days=1, ev="SBC"), PARAMS)
-    assert s.signal_type == HOLD
-    assert "SBC" in s.reason and "1d" in s.reason
+    d = decide(BUY_SERIES, BUY_SERIES.index[-1], PARAMS,
+               days_to_next_event=1, next_event_type="SBC")
+    assert d.action == SKIP
+    assert d.codes == (EVENT_IMMINENT,)
 
 
 def test_event_far_away_does_not_suppress_buy():
-    s = evaluate(_f(80_000, z=-1.8, mean=92_000, days=10, ev="SBC"), PARAMS)
-    assert s.signal_type == BUY
+    d = decide(BUY_SERIES, BUY_SERIES.index[-1], PARAMS,
+               days_to_next_event=10, next_event_type="SBC")
+    assert d.action == BUY
 
 
-def test_sell_when_overextended():
-    s = evaluate(_f(120_000, z=2.1, mean=100_000), PARAMS)
-    assert s.signal_type == SELL
-    assert "above its 24h average" in s.reason
+def test_non_crashing_event_does_not_suppress_buy():
+    d = decide(BUY_SERIES, BUY_SERIES.index[-1], PARAMS,
+               days_to_next_event=1, next_event_type="PATCH")
+    assert d.action == BUY
 
 
-# ---- momentum confirmation (falling-knife / let-it-run) ----
-
-def test_cheap_but_still_falling_is_held_not_bought():
-    # z says undervalued, but the price is still crashing 12% in 24h -> falling knife
-    s = evaluate(_f(80_000, z=-1.8, mean=92_000, mom=-12.0), PARAMS)
-    assert s.signal_type == HOLD
-    assert "still falling" in s.reason
-
-
-def test_cheap_and_drop_stabilized_is_bought():
-    # z undervalued and the drop has flattened (only -1% in 24h) -> dip confirmed
-    s = evaluate(_f(80_000, z=-1.8, mean=92_000, mom=-1.0), PARAMS)
-    assert s.signal_type == BUY
-    assert "stabilized" in s.reason
+def test_skip_names_every_failed_gate():
+    # at a peak the price is neither near the floor nor statistically cheap
+    prices = _sawtooth()
+    s = _series(prices)
+    peak_i = max(range(250, 300), key=lambda i: prices[i])
+    d = decide(s, s.index[peak_i], PARAMS)
+    assert d.action == SKIP
+    assert NOT_NEAR_FLOOR in d.codes
+    assert d.confidence == 0.0
 
 
-def test_overextended_but_still_climbing_is_held_not_sold():
-    # z says dear, but it's still ripping +9% in 24h -> let it run
-    s = evaluate(_f(120_000, z=2.1, mean=100_000, mom=9.0), PARAMS)
-    assert s.signal_type == HOLD
-    assert "still climbing" in s.reason
+def test_holding_without_trigger_is_hold_not_skip():
+    entry = float(BUY_SERIES.iloc[-1])  # just bought at the trough
+    d = decide(BUY_SERIES, BUY_SERIES.index[-1], PARAMS, entry_price=entry)
+    assert d.action == HOLD
+    assert "holding" in d.detail
 
 
-def test_momentum_guard_off_reverts_to_pure_zscore():
-    off = SignalParams(buy_z=-1.5, sell_z=1.5, event_guard_days=2, momentum_guard_pct=0)
-    # even mid-crash, guard-off buys purely on z-score
-    assert evaluate(_f(80_000, z=-1.8, mean=92_000, mom=-12.0), off).signal_type == BUY
-
-
-def test_hold_when_in_normal_range():
-    assert evaluate(_f(100_000, z=0.3, mean=99_000), PARAMS).signal_type == HOLD
-
-
-def test_hold_with_reason_when_no_history():
-    s = evaluate(_f(100_000, z=None), PARAMS)
-    assert s.signal_type == HOLD
-    assert s.confidence == 0.0
-    assert "insufficient" in s.reason.lower()
-
-
-def test_confidence_scales_with_z_magnitude():
-    weak = evaluate(_f(80_000, z=-1.6, mean=90_000), PARAMS).confidence
-    strong = evaluate(_f(70_000, z=-3.0, mean=90_000), PARAMS).confidence
-    assert strong > weak
-    assert strong == 1.0  # saturates at ~3 sigma
+def test_holding_sells_at_target_with_full_confidence():
+    price = float(BUY_SERIES.iloc[-1])
+    # entry far enough below that the current price clears the net-of-tax target
+    entry = price / (target_price(1.0, PARAMS) * 1.01)
+    d = decide(BUY_SERIES, BUY_SERIES.index[-1], PARAMS, entry_price=entry)
+    assert d.action == SELL
+    assert d.confidence == 1.0
 
 
 def test_alert_formatting():

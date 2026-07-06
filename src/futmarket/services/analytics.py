@@ -7,9 +7,25 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from . import watch
-from .. import backtest, db, features
+from .. import backtest, db, features, strategy
 from ..config import Config
-from ..signals import BUY, HOLD, SELL, SignalParams, evaluate
+from ..signals import BUY, HOLD, SELL, SKIP
+
+
+def evaluate_player(conn, config: Config, source: str,
+                    player_id: str) -> strategy.Decision | None:
+    """Run the unified engine on one player's stored series: entry price of any
+    open paper position (so holders get SELL/HOLD) and upcoming-event context
+    are looked up here so decide() itself stays pure. None if no data."""
+    series = features.to_series(db.snapshots(conn, player_id, source))
+    if series.empty:
+        return None
+    at = series.index[-1]
+    pos = db.position_get_open(conn, player_id)
+    days, ev_type = features._next_event(conn, player_id, at)
+    return strategy.decide(series, at, strategy.StrategyParams.from_config(config),
+                           entry_price=(pos["entry_price"] if pos else None),
+                           days_to_next_event=days, next_event_type=ev_type)
 
 
 def _result_dict(r) -> dict:
@@ -24,19 +40,20 @@ def _result_dict(r) -> dict:
 
 
 def run_backtest(conn, config: Config, source: str) -> dict:
-    """Backtest the signal rule vs baselines for every watchlist player."""
-    params = SignalParams.from_config(config)
+    """Backtest the unified engine vs baselines for every watchlist player."""
+    params = strategy.StrategyParams.from_config(config)
     rows = []
     for entry in watch.effective_entries(conn, config):
         table = features.compute_feature_table(conn, entry.player_id, source)
         if len(table) < 2:
             continue
-        cmp = backtest.evaluate_rule(table, params, config.tax_rate)
+        series = features.to_series(db.snapshots(conn, entry.player_id, source))
+        cmp = backtest.evaluate_rebound(table, series, params)
         rows.append({
             "player_id": entry.player_id,
             "name": entry.name,
             "snapshots": len(table),
-            "promote": cmp.beats_baselines,
+            "promote": cmp.promote(config.backtest_max_dd_multiple),
             "candidate": _result_dict(cmp.candidate),
             "baselines": [_result_dict(b) for b in cmp.baselines],
         })
@@ -45,21 +62,23 @@ def run_backtest(conn, config: Config, source: str) -> dict:
 
 
 def run_signals(conn, config: Config, source: str) -> dict:
-    """Evaluate + persist the current BUY/SELL/HOLD signal for each player."""
-    params = SignalParams.from_config(config)
+    """Evaluate + persist the current BUY/SELL/HOLD/SKIP decision for each
+    player. SKIPs are stored too — the audit trail of why the engine passed."""
     now = datetime.now(timezone.utc)
-    out, counts = [], {BUY: 0, SELL: 0, HOLD: 0}
+    out, counts = [], {BUY: 0, SELL: 0, HOLD: 0, SKIP: 0}
     for entry in watch.effective_entries(conn, config):
-        table = features.compute_feature_table(conn, entry.player_id, source)
-        if not table:
+        decision = evaluate_player(conn, config, source, entry.player_id)
+        if decision is None:
             continue
-        sig = evaluate(table[-1], params)
-        counts[sig.signal_type] += 1
-        db.insert_signal(conn, player_id=entry.player_id, signal_type=sig.signal_type,
-                         confidence=sig.confidence, reason=sig.reason, at=now)
+        counts[decision.action] += 1
+        reason = decision.detail
+        if decision.action == SKIP and decision.codes:
+            reason = f"[{','.join(decision.codes)}] {reason}"
+        db.insert_signal(conn, player_id=entry.player_id, signal_type=decision.action,
+                         confidence=decision.confidence, reason=reason, at=now)
         out.append({"player_id": entry.player_id, "name": entry.name,
-                    "type": sig.signal_type, "confidence": round(sig.confidence, 3),
-                    "reason": sig.reason})
+                    "type": decision.action, "confidence": round(decision.confidence, 3),
+                    "reason": reason})
     conn.commit()
     return {"buys": counts[BUY], "sells": counts[SELL], "holds": counts[HOLD],
-            "signals": out}
+            "skips": counts[SKIP], "signals": out}

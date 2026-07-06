@@ -36,7 +36,7 @@ INTERVAL_SEC=$(( INTERVAL_MIN * 60 ))
 
 echo "Installing autonomous collector:"
 echo "  repo:      $REPO"
-echo "  interval:  every $INTERVAL_MIN min ($(awk "BEGIN{printf \"%.1f\", 60/$INTERVAL_MIN}")x/hour)"
+echo "  interval:  every $INTERVAL_MIN min ($(awk "BEGIN{printf \"%.1f\", 60/$INTERVAL_MIN}" < /dev/null)x/hour)"
 echo "  wake mode: $([ "$WAKE" = 1 ] && echo 'wake Mac from sleep' || echo 'awake-only')"
 echo
 

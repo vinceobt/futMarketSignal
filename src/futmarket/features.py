@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 
 from . import db
@@ -88,6 +89,89 @@ def zscore(price: float, mean: float | None, std: float | None) -> float | None:
     if mean is None or std is None or std == 0:
         return None
     return (price - mean) / std
+
+
+# ---------------------------------------------------------------------------
+# Robust, duration-weighted statistics.
+#
+# BIN history is irregularly sampled (daily far back, hourly recently), so
+# per-point statistics over-weight whichever regime has more points. Instead,
+# each sample is weighted by how long its price *held* — the time until the
+# next sample. That makes median/MAD/quantiles invariant to sampling density,
+# and gives the sample at `at` itself weight 0, so "where is the price relative
+# to its range" is never judged against a range that includes the price itself.
+# ---------------------------------------------------------------------------
+
+# MAD -> sigma for a normal distribution; makes robust z comparable to a z-score.
+MAD_SIGMA = 1.4826
+
+
+def duration_weights(index: pd.DatetimeIndex, at: pd.Timestamp,
+                     max_gap_hours: float = 48.0) -> np.ndarray:
+    """Seconds each sample's price held: min(t_next, at) - t_i, the last point
+    holding until `at`. Each weight is capped at max_gap_hours so one stale
+    plateau can't own the distribution."""
+    if len(index) == 0:
+        return np.array([])
+    nxt = index[1:].append(pd.DatetimeIndex([pd.Timestamp(at)]))
+    held = (nxt - index).total_seconds()
+    return np.clip(np.asarray(held, dtype=float), 0.0, max_gap_hours * 3600.0)
+
+
+def weighted_quantile(values, weights, q: float) -> float | None:
+    """Quantile of a weighted sample via the inverted step CDF: the smallest
+    value v whose cumulative weight reaches q of the total. No interpolation,
+    so the result is always an actually-observed price."""
+    v = np.asarray(values, dtype=float)
+    w = np.asarray(weights, dtype=float)
+    keep = w > 0
+    if not keep.any():
+        return None
+    v, w = v[keep], w[keep]
+    order = np.argsort(v)
+    v, w = v[order], w[order]
+    cum = np.cumsum(w)
+    return float(v[np.searchsorted(cum, q * cum[-1])])
+
+
+@dataclass(frozen=True)
+class RobustStats:
+    median: float
+    mad: float          # duration-weighted median absolute deviation
+    sigma: float        # MAD_SIGMA * mad — robust stand-in for the std dev
+    n_eff: int          # samples carrying weight
+    span_hours: float   # wall-clock coverage of the window
+
+
+def robust_stats(window: pd.Series, at: pd.Timestamp,
+                 max_gap_hours: float = 48.0) -> RobustStats | None:
+    """Duration-weighted median/MAD of a trailing window. None if the window is
+    empty or carries no holding time (e.g. a single sample exactly at `at`)."""
+    if window.empty:
+        return None
+    w = duration_weights(window.index, at, max_gap_hours)
+    med = weighted_quantile(window.values, w, 0.5)
+    if med is None:
+        return None
+    mad = weighted_quantile(np.abs(np.asarray(window.values, dtype=float) - med), w, 0.5)
+    span = (window.index[-1] - window.index[0]).total_seconds() / 3600.0
+    return RobustStats(median=med, mad=mad, sigma=MAD_SIGMA * mad,
+                       n_eff=int((w > 0).sum()), span_hours=span)
+
+
+def robust_z(price: float, st: RobustStats | None) -> float | None:
+    """How many robust sigmas the price sits from its duration-weighted median.
+    None when dispersion is zero (a flat market has no meaningful z)."""
+    if st is None or st.sigma == 0:
+        return None
+    return (price - st.median) / st.sigma
+
+
+def robust_cv(st: RobustStats | None) -> float | None:
+    """Robust coefficient of variation: sigma relative to the median price."""
+    if st is None or st.median == 0:
+        return None
+    return st.sigma / st.median
 
 
 def is_weekend_window(at: pd.Timestamp | datetime) -> int:

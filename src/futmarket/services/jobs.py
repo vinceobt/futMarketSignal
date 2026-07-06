@@ -141,7 +141,8 @@ class JobRunner:
         db.append_job_log(conn, job_id, "evaluating signals…")
         res = analytics.run_signals(conn, cfg, cfg.source)
         db.update_job(conn, job_id, result_json=json.dumps(res),
-                      detail=f"BUY {res['buys']} · SELL {res['sells']} · HOLD {res['holds']}")
+                      detail=f"BUY {res['buys']} · SELL {res['sells']} · "
+                             f"HOLD {res['holds']} · SKIP {res['skips']}")
 
     def _run_build_features(self, conn, job_id, params):
         cfg = self._cfg()

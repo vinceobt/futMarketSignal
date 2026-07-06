@@ -11,13 +11,11 @@ from datetime import datetime, timezone
 
 from . import db, features
 from .config import Config
-from .services import watch
-from .signals import BUY, HOLD, SELL, SignalParams, evaluate
+from .services import analytics, watch
+from .signals import BUY, HOLD, SELL, SKIP
 
 
 def build_payload(config: Config, conn, source: str) -> dict:
-    params = SignalParams.from_config(config)
-
     # rating/name are enriched by the collector into the players table (the
     # URL-only watchlist entry carries no rating); prefer those stored values.
     stored = {
@@ -25,16 +23,16 @@ def build_payload(config: Config, conn, source: str) -> dict:
         for r in conn.execute("SELECT player_id, name, rating FROM players").fetchall()
     }
 
-    players, buys, sells, holds = [], 0, 0, 0
+    players, counts = [], {BUY: 0, SELL: 0, HOLD: 0, SKIP: 0}
     for entry in watch.effective_entries(conn, config):
         table = features.compute_feature_table(conn, entry.player_id, source)
         if not table:
             continue
         latest = table[-1]
-        sig = evaluate(latest, params)
-        buys += sig.signal_type == BUY
-        sells += sig.signal_type == SELL
-        holds += sig.signal_type == HOLD
+        decision = analytics.evaluate_player(conn, config, source, entry.player_id)
+        if decision is None:
+            continue
+        counts[decision.action] += 1
 
         row = stored.get(entry.player_id)
         players.append({
@@ -44,7 +42,7 @@ def build_payload(config: Config, conn, source: str) -> dict:
             "price": latest.price,
             "pct_change_24h": (round(latest.pct_change_24h, 2)
                                if latest.pct_change_24h is not None else None),
-            "signal": {"type": sig.signal_type, "reason": sig.reason},
+            "signal": {"type": decision.action, "reason": decision.detail},
             "series": [{"t": f.timestamp, "price": f.price} for f in table],
         })
 
@@ -57,9 +55,10 @@ def build_payload(config: Config, conn, source: str) -> dict:
         "summary": {
             "tracked": len(players),
             "snapshots": snap_total,
-            "buys": buys,
-            "sells": sells,
-            "holds": holds,
+            "buys": counts[BUY],
+            "sells": counts[SELL],
+            "holds": counts[HOLD],
+            "skips": counts[SKIP],
         },
         "players": players,
     }

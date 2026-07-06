@@ -469,7 +469,8 @@
     var s = document.querySelector(".hdr .id-src");
     if (s) s.textContent = "Source " + d.source + " · " + d.platform + " · " +
       d.summary.snapshots.toLocaleString() + " snapshots · " +
-      d.summary.buys + " BUY / " + d.summary.sells + " SELL / " + d.summary.holds + " HOLD";
+      d.summary.buys + " BUY / " + d.summary.sells + " SELL / " + d.summary.holds +
+      " HOLD / " + (d.summary.skips || 0) + " SKIP";
   }
 
   function playerTable(d) {

@@ -70,6 +70,69 @@ def test_is_weekend_window():
     assert F.is_weekend_window(pd.Timestamp("2026-07-01T09:00:00Z")) == 0
 
 
+# ---- robust, duration-weighted statistics ----
+
+def test_weighted_quantile_hand_calc():
+    # values 1,2,3 with weights 1,1,2 (total 4): the step CDF hits
+    # 0.5*4=2 at value 2 and 0.75*4=3 at value 3
+    assert F.weighted_quantile([1, 2, 3], [1, 1, 2], 0.5) == 2
+    assert F.weighted_quantile([1, 2, 3], [1, 1, 2], 0.75) == 3
+    assert F.weighted_quantile([1, 2, 3], [1, 1, 2], 0.10) == 1
+    assert F.weighted_quantile([1, 2, 3], [0, 0, 0], 0.5) is None
+
+
+def test_duration_weights_hold_until_next_sample():
+    idx = pd.DatetimeIndex([pd.Timestamp("2026-07-01T00:00:00Z"),
+                            pd.Timestamp("2026-07-01T01:00:00Z"),
+                            pd.Timestamp("2026-07-01T03:00:00Z")])
+    w = F.duration_weights(idx, pd.Timestamp("2026-07-01T04:00:00Z"))
+    assert list(w) == [3600.0, 7200.0, 3600.0]
+    # the sample exactly at `at` holds for 0s -> weight 0 (self-exclusion)
+    w = F.duration_weights(idx, idx[-1])
+    assert w[-1] == 0.0
+    # a week-long stale plateau is capped at max_gap_hours
+    idx2 = pd.DatetimeIndex([pd.Timestamp("2026-07-01T00:00:00Z"),
+                             pd.Timestamp("2026-07-08T00:00:00Z")])
+    w2 = F.duration_weights(idx2, idx2[-1], max_gap_hours=48.0)
+    assert w2[0] == 48.0 * 3600.0
+
+
+def test_robust_stats_invariant_to_sampling_density():
+    # the same price path — one day at 100 then one day at 200 — sampled
+    # sparsely (2 points) and densely (hourly) must yield identical stats
+    at = pd.Timestamp("2026-07-03T00:00:00Z")
+    sparse = _series([("2026-07-01T00:00:00Z", 100), ("2026-07-02T00:00:00Z", 200)])
+    dense_pairs = ([(f"2026-07-01T{h:02d}:00:00Z", 100) for h in range(24)]
+                   + [(f"2026-07-02T{h:02d}:00:00Z", 200) for h in range(24)])
+    dense = _series(dense_pairs)
+    st_s = F.robust_stats(sparse, at)
+    st_d = F.robust_stats(dense, at)
+    assert st_s.median == st_d.median
+    assert st_s.mad == st_d.mad
+
+
+def test_robust_z_and_cv():
+    at = pd.Timestamp("2026-07-03T00:00:00Z")
+    s = _series([("2026-07-01T00:00:00Z", 100), ("2026-07-02T00:00:00Z", 200)])
+    st = F.robust_stats(s, at)
+    # step-CDF weighted median of {100(24h), 200(24h)} = 100; MAD likewise
+    assert st.median == 100 and st.mad == 0
+    assert F.robust_z(150, st) is None      # flat MAD -> no z
+    flat = _series([("2026-07-01T00:00:00Z", 100), ("2026-07-02T00:00:00Z", 100)])
+    st_flat = F.robust_stats(flat, at)
+    assert F.robust_cv(st_flat) == 0.0
+
+
+def test_robust_median_excludes_the_current_point():
+    # 2 held samples at 100, then a crash to 50 exactly at `at`: the crash
+    # carries no holding time yet, so the reference stats ignore it
+    s = _series([("2026-07-01T00:00:00Z", 100), ("2026-07-01T12:00:00Z", 100),
+                 ("2026-07-02T00:00:00Z", 50)])
+    st = F.robust_stats(s, pd.Timestamp("2026-07-02T00:00:00Z"))
+    assert st.median == 100
+    assert st.n_eff == 2
+
+
 def test_compute_feature_table_end_to_end(config, conn):
     base = [("2026-07-01T12:00:00Z", 90_000),
             ("2026-07-01T13:00:00Z", 100_000),

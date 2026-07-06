@@ -21,7 +21,7 @@ from typing import Callable
 import pandas as pd
 
 from .features import FeatureRow
-from .signals import BUY, HOLD, SELL, SignalParams, evaluate
+from .signals import BUY, HOLD, SELL
 from . import strategy as strat
 
 Decider = Callable[[FeatureRow], str]
@@ -85,19 +85,14 @@ def run_backtest(features: list[FeatureRow], decide: Decider,
     )
 
 
-def rule_decider(params: SignalParams) -> Decider:
-    """The live rule, as a backtest decider — same code path as Phase 3."""
-    return lambda f: evaluate(f, params).signal_type
-
-
 def run_rebound_backtest(features: list[FeatureRow], series: "pd.Series",
                          params: "strat.StrategyParams",
                          label: str = "rebound") -> BacktestResult:
-    """Position-aware backtest of the rebound strategy. Same equity/tax/drawdown
+    """Position-aware backtest of the unified engine. Same equity/tax/drawdown
     accounting as run_backtest, but the SELL check needs the entry price (the
     plain Decider only sees the current row), so the loop lives here and calls
-    strategy.analyze on the trailing window at each step — exactly what the live
-    advisor does, so backtest and live never diverge."""
+    strategy.decide on the trailing window at each step — exactly what the live
+    advisor does, so backtest and live never diverge. SKIP means stay flat."""
     tax_rate = params.tax_rate
     cash, units, entry, entry_ctx = 1.0, 0.0, 0.0, None
     peak, max_dd = 1.0, 0.0
@@ -106,13 +101,16 @@ def run_rebound_backtest(features: list[FeatureRow], series: "pd.Series",
     for f in features:
         price = f.price
         at = pd.Timestamp(f.timestamp)
-        view = strat.analyze(series, at, params)
 
-        if units == 0.0 and cash > 0.0 and strat.should_buy(view):
-            units, cash, entry, entry_ctx = cash / price, 0.0, float(price), (f.timestamp, price)
+        if units == 0.0 and cash > 0.0:
+            decision = strat.decide(series, at, params,
+                                    days_to_next_event=f.days_to_next_event,
+                                    next_event_type=f.next_event_type)
+            if decision.action == BUY:
+                units, cash, entry, entry_ctx = cash / price, 0.0, float(price), (f.timestamp, price)
         elif units > 0.0:
-            sell, _ = strat.should_sell(price, entry, view.floor, view.ceiling, params)
-            if sell:
+            decision = strat.decide(series, at, params, entry_price=entry)
+            if decision.action == SELL:
                 proceeds = units * price * (1.0 - tax_rate)
                 ret = proceeds / (units * entry_ctx[1]) - 1.0
                 trades.append(Trade(entry_ctx[0], entry_ctx[1], f.timestamp, price, ret))
@@ -187,17 +185,21 @@ class Comparison:
     candidate: BacktestResult
     baselines: list[BacktestResult]
 
+    def promote(self, dd_multiple: float = 1.0) -> bool:
+        """Promote only if the candidate actually made money, its total return
+        clears every baseline, AND its max drawdown stays within dd_multiple of
+        the worst baseline's. Both absolute and relative: on a collapsing card
+        every baseline is catastrophic, and 'lost less than a monkey' is not an
+        edge — the tradable alternative is simply not trading that card."""
+        if self.candidate.total_return <= 0:
+            return False
+        if not all(self.candidate.total_return > b.total_return for b in self.baselines):
+            return False
+        ref_dd = max((b.max_drawdown for b in self.baselines), default=0.0)
+        if ref_dd > 0:
+            return self.candidate.max_drawdown <= dd_multiple * ref_dd
+        return self.candidate.max_drawdown <= 0.10
+
     @property
     def beats_baselines(self) -> bool:
-        """Promote only if the candidate's total return clears every baseline."""
-        return all(self.candidate.total_return > b.total_return for b in self.baselines)
-
-
-def evaluate_rule(features: list[FeatureRow], params: SignalParams,
-                  tax_rate: float = 0.05) -> Comparison:
-    candidate = run_backtest(features, rule_decider(params), tax_rate, label="z-score rule")
-    return Comparison(
-        candidate=candidate,
-        baselines=[buy_and_hold(features, tax_rate),
-                   random_baseline(features, tax_rate)],
-    )
+        return self.promote(1.0)

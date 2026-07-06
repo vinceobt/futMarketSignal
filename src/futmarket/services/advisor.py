@@ -16,9 +16,10 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from .. import alerts as alertmod
-from .. import db, strategy
+from .. import db, features, strategy
 from ..config import Config
 from ..features import to_series
+from ..signals import BUY, SELL
 from . import watch
 
 log = logging.getLogger("futmarket.advisor")
@@ -57,12 +58,15 @@ def run(conn, config: Config, source: str, *, dry_run: bool = False,
             continue
         screened += 1
         at = series.index[-1]
-        view = strategy.analyze(series, at, params)
-        price = int(view.price)
         pos = db.position_get_open(conn, player_id)
 
         if pos is None:
-            if strategy.should_buy(view):
+            days, ev_type = features._next_event(conn, player_id, at)
+            decision = strategy.decide(series, at, params,
+                                       days_to_next_event=days, next_event_type=ev_type)
+            view = decision.view
+            price = int(view.price)
+            if decision.action == BUY:
                 tgt = int(strategy.target_price(price, params))
                 stop = strategy.stop_price(view.floor, params)
                 stop = int(stop) if stop else None
@@ -78,12 +82,15 @@ def run(conn, config: Config, source: str, *, dry_run: bool = False,
                     db.position_open(conn, player_id=player_id, entry_price=price,
                                      entry_ts=now, target_price=tgt, stop_price=stop,
                                      floor_price=int(view.floor) if view.floor else None,
-                                     reason=view.reason)
+                                     reason=decision.detail)
                     _send(alerter, msg)
+            # SKIP stays silent: no position, no alert, codes only in the logs.
         else:
             entry = pos["entry_price"]
-            sell, why = strategy.should_sell(price, entry, view.floor, view.ceiling, params)
-            if sell:
+            decision = strategy.decide(series, at, params, entry_price=entry)
+            price = int(decision.view.price)
+            if decision.action == SELL:
+                why = decision.detail
                 realized = (price * (1 - params.tax_rate) / entry - 1.0) * 100.0
                 msg = alertmod.format_trade_alert("SELL", name, price,
                                                   realized_pct=realized, reason=why)

@@ -257,31 +257,50 @@ futmarket backtest --strategy rebound   # score the strategy vs baselines on YOU
 
 Set `alerts.destination: discord` and paste a channel **webhook URL** in
 `config.yaml`. Tune the pattern under `strategy:` (`window_days`, `min_bounces`,
-`buy_zone_pct`, `target_pct`, `stop_pct`, `momentum_screen_limit`). When you run
+`buy_zone_pct`, `floor_pctile`, `min_touches`, `z_buy`, `min_margin_pct`,
+`target_pct`, `stop_pct`, `momentum_screen_limit`, …). When you run
 autonomously (below), `advise` runs after every collection pass, so alerts fire on
 their own. In the dashboard, a **Positions** card shows open/closed positions and
 a **Run advisor** button.
 
-**How it decides.** The launch price is irrelevant — only the *recent trading
-range* matters. Over the trailing `window_days` it finds the support floor,
-counts *completed rebounds* (dip to the floor → recover ≥ `target_pct`), and
-checks the **sequence of rebound troughs**: a card that keeps bouncing off ~the
-same floor is a stable rebounder; one making progressively *lower lows* is a
-falling knife and is rejected. Crucially, a card that launched high, **crashed,
-and then settled into a range** is a valid buy — the crash is ignored because it
-never dips into the buy-zone, so it's never counted as a trough. BUY = reliable
-rebounder **and** price in the buy-zone now.
+**How it decides.** One pure function — `strategy.decide()` — turns a price
+series into an explicit **BUY / SELL / SKIP**, and the same function runs in the
+backtest, the advisor, and the scanner. All statistics are **duration-weighted**
+(each sample counts by how long its price held), so fut.gg's
+daily-then-hourly history doesn't skew the math and the current price never
+sits inside its own reference range. The launch price is irrelevant — only the
+*recent trading range* matters. Over the trailing `window_days` it:
 
-**Selling — two modes (`strategy.sell_mode`):**
-- `target` (default): sell at a **fixed profit** — `target_pct` (default **25%**)
-  net of the 5% tax. Predictable, always exits.
-- `resistance`: **ride the swing to the ceiling** — sell when price returns near
-  the range's resistance (the `resistance_pctile` percentile of the card's actual
-  rebound *peaks*, crash-robust). Captures the whole move (on a 1.2k↔3k card that's
-  ~+120% vs ~+25% for a fixed target) but may miss an exit if a cycle falls short
-  of the ceiling.
+- finds the **floor** (duration-weighted `floor_pctile` of the window) and the
+  **ceiling** (`resistance_pctile`, tightened by actual rebound peaks once they
+  exist);
+- **validates the support**: ≥ `min_touches` distinct visits to the floor band
+  (hysteresis-counted, so noise can't double-count) and ≥ `min_bounces`
+  completed rebounds (dip → recover ≥ `target_pct`);
+- rejects **falling knives** twice over: a Theil–Sen fit over the dip lows
+  (`floor_drift_pct` — one outlier low can't fake or hide a downtrend), and a
+  hard refusal to buy any price already below the stop level (`FLOOR_BROKEN`);
+- requires the price to be **statistically cheap** (robust z ≤ −`z_buy`, from
+  the duration-weighted median/MAD, spike-proof) *and* the range to be **worth
+  the tax**: the projected net margin `ceiling·(1−tax)/price − 1` must clear
+  `min_margin_pct` — a 4% range is a guaranteed loss after EA's 5% cut, so it
+  is skipped no matter how pretty the dip looks.
 
-Both modes honor the optional stop below the floor.
+Everything that fails is an explicit **SKIP with machine reason codes**
+(`INSUFFICIENT_POINTS`, `STALE`, `FLAT_MARKET`, `TOO_VOLATILE`,
+`MARGIN_TOO_THIN`, `FLOOR_DRIFTING`, `EVENT_IMMINENT`, …) so every pass is
+auditable. Crucially, a card that launched high, **crashed, and then settled
+into a range** is still a valid buy — the crash carries no completed rebounds,
+so it never pollutes the floor or the ceiling.
+
+**Selling — `strategy.sell_mode`:**
+- `either` (default): first trigger wins — the fixed net-of-tax `target_pct`,
+  **or** a return to within `exit_band_pct` of the ceiling (never at a net
+  loss), **or** the stop.
+- `target`: only the fixed profit target. Predictable, always exits.
+- `resistance`: only the ride-to-the-ceiling exit.
+
+Every mode honors the optional stop below the floor (`stop_pct`).
 
 **Honesty caveats.**
 - **Paper only** — it alerts *you* and tracks a virtual position; it never trades
@@ -363,32 +382,29 @@ Everything lives in `config.yaml` — nothing operational is hardcoded.
 | `max_watchlist_size` | hard cap (default 50), enforced at load |
 | `database_path`, `log_path` | storage locations |
 
-**`signals:`** — the rule thresholds, shared by the backtester and live engine.
-Tune here, re-backtest, then trust.
+**`signals:`**
 
 | Key | Meaning |
 |---|---|
-| `buy_z` | BUY when z-score ≤ this (default −1.5) |
-| `sell_z` | SELL when z-score ≥ this (default 1.5) |
-| `event_guard_days` | suppress BUY if a crashing event is within this many days |
-| `momentum_guard_pct` | **opt-in** momentum confirmation (default 0 = off) |
-| `tax_rate` | EA sell tax used in backtest P&L (default 0.05) |
+| `tax_rate` | EA sell tax used everywhere P&L is computed (default 0.05) |
 
-**Momentum confirmation (`momentum_guard_pct`).** The base rule is pure
-mean-reversion (z-score): it answers *"is the price cheap or dear?"* but not
-*"is it still moving that way?"* — so it can catch a falling knife (a card that
-looks cheap every hour on the way down) or sell a winner too early. Setting
-`momentum_guard_pct > 0` adds a directional filter using the 24h price change:
-a BUY is held while the price is still falling faster than the threshold, and a
-SELL is held while it's still climbing faster. It uses `pct_change_24h` — the
-same field the backtester replays — so the live and backtested rules never
-diverge.
+The old z-score rule (`buy_z`/`sell_z`/`momentum_guard_pct`) is gone — its ideas
+live inside the unified engine as the robust-z gate and the falling-knife
+guards. Stale keys in an old config are ignored harmlessly.
 
-**It ships off (0) on purpose.** In our own backtest it *reduced* returns on
-coarse daily history (during a steady crash, "below the 24h mean" and "24h change
-negative" fire together, so it over-blocks the dip-buys that recovered). Turn it
-on only after it beats the plain rule in `futmarket backtest` on your own
-accumulated (ideally hourly) data — tune, backtest, then trust.
+**`strategy:`** — every knob of the unified engine (see the advisor section
+above for the semantics): `window_days`, `min_bounces`, `buy_zone_pct`,
+`sell_mode`, `target_pct`, `resistance_pctile`, `stop_pct`, `floor_pctile`,
+`floor_drift_pct`, `touch_tol_pct`, `min_touches`, `z_buy`, `cv_max`,
+`min_margin_pct`, `min_points`, `min_span_hours`, `max_stale_hours`,
+`exit_band_pct`, `event_guard_days`, `max_gap_hours`, `momentum_screen_limit`.
+Tune here, re-backtest (`futmarket backtest`), then trust.
+
+**`backtest:`**
+
+| Key | Meaning |
+|---|---|
+| `max_dd_multiple` | promotion also requires the candidate's max drawdown ≤ this multiple of the worst baseline's (default 1.0) |
 
 **`alerts:`**
 
@@ -435,8 +451,8 @@ Editing the `watchlist:` block in `config.yaml` after the first run has no effec
   re-runs and restarts can't duplicate rows.
 - **Graceful degradation** — one player failing never stops a pass; a source
   failing repeatedly trips a breaker and cools down instead of hammering.
-- **No test/production drift** — the backtester replays the same `evaluate()`
-  the live engine fires.
+- **No test/production drift** — the backtester replays the same
+  `strategy.decide()` the live advisor fires.
 - **Structured logs** — every collect/skip/failure/signal in `data/collector.log`.
 
 ---
@@ -449,11 +465,13 @@ Editing the `watchlist:` block in `config.yaml` after the first run has no effec
   flag; derived `features` table.
 - **Phase 2 (done)** — backtesting harness (`backtest.py`): long-only sim net of
   the 5% sell tax; hit rate, avg return, total return, max drawdown vs.
-  buy-and-hold and random baselines; `beats_baselines` gates promotion.
-- **Phase 3 (done)** — signal engine (`signals.py`) with confidence + reasons,
-  and alert delivery (`alerts.py`) to console/Discord in digest/realtime mode.
-  ML is intentionally deferred: it earns a place only after beating the
-  baselines in this same harness.
+  buy-and-hold and random baselines; promotion requires a positive return that
+  beats every baseline *and* a drawdown within `backtest.max_dd_multiple` of the
+  worst baseline's.
+- **Phase 3 (done)** — the unified decision engine (`strategy.decide()`) with
+  confidence + machine reason codes, and alert delivery (`alerts.py`) to
+  console/Discord in digest/realtime mode. ML is intentionally deferred: it
+  earns a place only after beating the baselines in this same harness.
 - **Dashboard (done)** — interactive local web UI over the whole pipeline.
 
 Each phase is gated on validating the previous one against real data. The

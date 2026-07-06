@@ -301,28 +301,17 @@ def cmd_log_event(args) -> None:
     print(f"logged event #{event_id}: {args.type.upper()} {scope} starting {args.start}")
 
 
-def _latest_features_by_player(conn, config, source):
-    """(entry, latest FeatureRow) for every player that has data."""
-    from . import features
-    out = []
-    for entry in watch.effective_entries(conn, config):
-        table = features.compute_feature_table(conn, entry.player_id, source)
-        if table:
-            out.append((entry, table[-1]))
-    return out
-
-
 def cmd_backtest(args) -> None:
     from . import backtest, features
-    from .signals import SignalParams
     from .strategy import StrategyParams
     config = _load(args)
     conn = db.connect(config.database_path)
     source = _resolve_source(conn, args.source)
+    from dataclasses import replace
     tax = args.tax if args.tax is not None else config.tax_rate
-    params = SignalParams.from_config(config)
     strat_params = StrategyParams.from_config(config)
-    use_rebound = args.strategy == "rebound"
+    if args.tax is not None:
+        strat_params = replace(strat_params, tax_rate=tax)
 
     targets = ([_watchlist_entry(conn, config, args.player_id)] if args.player_id
                else list(watch.effective_entries(conn, config)))
@@ -332,11 +321,8 @@ def cmd_backtest(args) -> None:
         if len(table) < 2:
             continue
         any_output = True
-        if use_rebound:
-            series = features.to_series(db.snapshots(conn, entry.player_id, source))
-            cmp = backtest.evaluate_rebound(table, series, strat_params)
-        else:
-            cmp = backtest.evaluate_rule(table, params, tax)
+        series = features.to_series(db.snapshots(conn, entry.player_id, source))
+        cmp = backtest.evaluate_rebound(table, series, strat_params)
         print(f"\n{entry.name} ({entry.player_id})  source={source}  "
               f"snapshots={len(table)}  tax={tax:.0%}")
         header = f"  {'strategy':<16}{'trades':>7}{'hit%':>7}{'avg/trade':>11}{'total':>9}{'maxDD':>8}"
@@ -347,8 +333,14 @@ def cmd_backtest(args) -> None:
                   f"{r.max_drawdown*100:>7.1f}%")
         if cmp.candidate.n_trades == 0:
             verdict = "NO TRADES — strategy found no qualifying setups (stayed flat)"
-        elif cmp.beats_baselines:
-            verdict = "PROMOTE — beats every baseline"
+        elif cmp.promote(config.backtest_max_dd_multiple):
+            verdict = "PROMOTE — beats every baseline (return AND drawdown)"
+        elif cmp.candidate.total_return <= 0:
+            verdict = ("DO NOT PROMOTE — lost money overall "
+                       "(not trading this card beats every strategy)")
+        elif cmp.promote(float("inf")):
+            verdict = ("DO NOT PROMOTE — beats returns but its drawdown is worse "
+                       "than the baselines'")
         else:
             verdict = "DO NOT PROMOTE — fails to beat a baseline"
         print(f"  -> {verdict}")
@@ -358,45 +350,42 @@ def cmd_backtest(args) -> None:
 
 
 def cmd_signals(args) -> None:
-    from datetime import datetime, timezone
-    from .signals import SignalParams, evaluate
+    from .services import analytics
     config = _load(args)
     setup_logging(config.log_path)
     conn = db.connect(config.database_path)
     source = _resolve_source(conn, args.source)
-    params = SignalParams.from_config(config)
-    now = datetime.now(timezone.utc)
-    rows = _latest_features_by_player(conn, config, source)
-    if not rows:
-        print(f"no features available in source={source!r}")
+    res = analytics.run_signals(conn, config, source)
+    if not res["signals"]:
+        print(f"no price history available in source={source!r}")
         return
-    for entry, f in rows:
-        sig = evaluate(f, params)
-        db.insert_signal(conn, player_id=entry.player_id, signal_type=sig.signal_type,
-                         confidence=sig.confidence, reason=sig.reason, at=now)
-        print(f"[{sig.signal_type:<4}] {entry.name:<22} {sig.confidence:>4.0%}  {sig.reason}")
-    conn.commit()
+    for s in res["signals"]:
+        print(f"[{s['type']:<4}] {s['name']:<22} {s['confidence']:>5.0%}  {s['reason']}")
+    print(f"\n{res['buys']} BUY · {res['sells']} SELL · {res['holds']} HOLD · "
+          f"{res['skips']} SKIP")
 
 
 def cmd_alert(args) -> None:
     from datetime import datetime, timezone
     from . import alerts as alertmod
-    from .signals import SignalParams, evaluate, BUY, SELL
+    from .services import analytics
+    from .signals import BUY, SELL
     config = _load(args)
     setup_logging(config.log_path)
     conn = db.connect(config.database_path)
     source = _resolve_source(conn, args.source)
-    params = SignalParams.from_config(config)
     try:
         alerter = alertmod.get_alerter(config)
     except ValueError as exc:
         sys.exit(str(exc))
 
     built = []
-    for entry, f in _latest_features_by_player(conn, config, source):
-        sig = evaluate(f, params)
-        built.append(alertmod.Alert(entry.player_id, entry.name, sig.signal_type,
-                                    sig.confidence, sig.reason))
+    for entry in watch.effective_entries(conn, config):
+        decision = analytics.evaluate_player(conn, config, source, entry.player_id)
+        if decision is None:
+            continue
+        built.append(alertmod.Alert(entry.player_id, entry.name, decision.action,
+                                    decision.confidence, decision.detail))
 
     if args.digest:
         date_str = datetime.now(timezone.utc).date().isoformat()
@@ -521,12 +510,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--notes", default=None)
     p.set_defaults(func=cmd_log_event)
 
-    p = sub.add_parser("backtest", help="replay a strategy vs naive baselines")
+    p = sub.add_parser("backtest", help="replay the decision engine vs naive baselines")
     p.add_argument("player_id", nargs="?", default=None, help="one player, or omit for all")
     p.add_argument("--source", default=None)
     p.add_argument("--tax", type=float, default=None, help="sell tax (default: config tax_rate)")
-    p.add_argument("--strategy", choices=["zscore", "rebound"], default="zscore",
-                   help="which strategy to score (default: zscore)")
+    p.add_argument("--strategy", choices=["rebound"], default="rebound",
+                   help="kept for muscle memory; the unified engine is the only strategy")
     p.set_defaults(func=cmd_backtest)
 
     p = sub.add_parser("advise", help="run the rebound advisor: analyze, manage positions, alert")

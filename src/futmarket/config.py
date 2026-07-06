@@ -66,11 +66,6 @@ class Config:
     database_path: Path
     log_path: Path
     watchlist: tuple[WatchlistEntry, ...] = field(default_factory=tuple)
-    # Signal rule thresholds (shared by the backtester and the live engine).
-    buy_z: float = -1.5
-    sell_z: float = 1.5
-    event_guard_days: int = 2
-    momentum_guard_pct: float = 0.0  # block a BUY still falling / hold a SELL still rising (24h %); 0 = off (opt-in, backtest first)
     tax_rate: float = 0.05  # EA transfer-market tax on sales
     # Alerts
     min_confidence_alert: float = 0.6  # realtime pushes only at/above this
@@ -78,23 +73,38 @@ class Config:
     webhook_url: str | None = None
     # Momentum scanner: how many top movers to pull from fut.gg per refresh.
     momentum_limit: int = 30
-    # Rebound strategy (the autonomous advisor).
+    # Unified decision engine (strategy.decide — the advisor, scanner, and backtest).
     strategy_window_days: int = 30
     strategy_min_bounces: int = 3
     strategy_buy_zone_pct: float = 3.0
-    strategy_sell_mode: str = "target"
+    strategy_sell_mode: str = "either"
     strategy_target_pct: float = 25.0
     strategy_resistance_pctile: float = 80.0
     strategy_stop_pct: float = 8.0
+    strategy_floor_pctile: float = 15.0
     strategy_floor_drift_pct: float = 10.0
+    strategy_touch_tol_pct: float = 3.0
+    strategy_min_touches: int = 3
+    strategy_z_buy: float = 0.5
+    strategy_cv_max: float = 0.60
+    strategy_min_margin_pct: float = 8.0
+    strategy_min_points: int = 10
+    strategy_min_span_hours: float = 168.0
+    strategy_max_stale_hours: float = 48.0
+    strategy_exit_band_pct: float = 2.0
+    strategy_event_guard_days: int = 2
+    strategy_max_gap_hours: float = 48.0
     strategy_momentum_screen_limit: int = 8  # movers to scrape+screen per cycle; 0 = watchlist only
+    # Backtest promotion: candidate drawdown may be at most this multiple of the
+    # worst baseline drawdown (as well as beating every baseline's return).
+    backtest_max_dd_multiple: float = 1.0
 
 
 class ConfigError(ValueError):
     pass
 
 
-VALID_SELL_MODES = {"target", "resistance"}
+VALID_SELL_MODES = {"target", "resistance", "either"}
 
 
 def _valid_sell_mode(v) -> str:
@@ -112,6 +122,7 @@ def load_config(path: str | Path) -> Config:
     signals_cfg = raw.get("signals") or {}
     alerts_cfg = raw.get("alerts") or {}
     strategy_cfg = raw.get("strategy") or {}
+    backtest_cfg = raw.get("backtest") or {}
 
     source = raw.get("source", "manual")
     if source not in VALID_SOURCES:
@@ -170,10 +181,6 @@ def load_config(path: str | Path) -> Config:
         database_path=base / raw.get("database_path", "data/market.db"),
         log_path=base / raw.get("log_path", "data/collector.log"),
         watchlist=tuple(entries),
-        buy_z=float(signals_cfg.get("buy_z", -1.5)),
-        sell_z=float(signals_cfg.get("sell_z", 1.5)),
-        event_guard_days=int(signals_cfg.get("event_guard_days", 2)),
-        momentum_guard_pct=float(signals_cfg.get("momentum_guard_pct", 0.0)),
         tax_rate=float(signals_cfg.get("tax_rate", 0.05)),
         min_confidence_alert=float(alerts_cfg.get("min_confidence", 0.6)),
         alert_destination=str(alerts_cfg.get("destination", "console")),
@@ -182,10 +189,25 @@ def load_config(path: str | Path) -> Config:
         strategy_window_days=int(strategy_cfg.get("window_days", 30)),
         strategy_min_bounces=int(strategy_cfg.get("min_bounces", 3)),
         strategy_buy_zone_pct=float(strategy_cfg.get("buy_zone_pct", 3.0)),
-        strategy_sell_mode=_valid_sell_mode(strategy_cfg.get("sell_mode", "target")),
+        strategy_sell_mode=_valid_sell_mode(strategy_cfg.get("sell_mode", "either")),
         strategy_target_pct=float(strategy_cfg.get("target_pct", 25.0)),
         strategy_resistance_pctile=float(strategy_cfg.get("resistance_pctile", 80.0)),
         strategy_stop_pct=float(strategy_cfg.get("stop_pct", 8.0)),
+        strategy_floor_pctile=float(strategy_cfg.get("floor_pctile", 15.0)),
         strategy_floor_drift_pct=float(strategy_cfg.get("floor_drift_pct", 10.0)),
+        strategy_touch_tol_pct=float(strategy_cfg.get("touch_tol_pct", 3.0)),
+        strategy_min_touches=int(strategy_cfg.get("min_touches", 3)),
+        strategy_z_buy=float(strategy_cfg.get("z_buy", 0.5)),
+        strategy_cv_max=float(strategy_cfg.get("cv_max", 0.60)),
+        strategy_min_margin_pct=float(strategy_cfg.get("min_margin_pct", 8.0)),
+        strategy_min_points=int(strategy_cfg.get("min_points", 10)),
+        strategy_min_span_hours=float(strategy_cfg.get("min_span_hours", 168.0)),
+        strategy_max_stale_hours=float(strategy_cfg.get("max_stale_hours", 48.0)),
+        strategy_exit_band_pct=float(strategy_cfg.get("exit_band_pct", 2.0)),
+        # event_guard_days used to live under signals:, honor it there as a fallback
+        strategy_event_guard_days=int(strategy_cfg.get(
+            "event_guard_days", signals_cfg.get("event_guard_days", 2))),
+        strategy_max_gap_hours=float(strategy_cfg.get("max_gap_hours", 48.0)),
         strategy_momentum_screen_limit=int(strategy_cfg.get("momentum_screen_limit", 8)),
+        backtest_max_dd_multiple=float(backtest_cfg.get("max_dd_multiple", 1.0)),
     )

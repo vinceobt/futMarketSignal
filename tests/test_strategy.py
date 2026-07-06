@@ -1,13 +1,17 @@
-"""Rebound strategy: reliable-bouncer detection, falling-knife rejection, and the
-buy/sell triggers — spot-checked against constructed price series."""
+"""The unified engine: reliable-bouncer detection, falling-knife rejection, the
+SKIP gates, and the buy/sell triggers — spot-checked against constructed series."""
 
 import math
 
 import pandas as pd
 import pytest
 
-from futmarket.strategy import (StrategyParams, analyze, should_buy, should_sell,
-                                target_price)
+from futmarket.signals import BUY, SKIP
+from futmarket.strategy import (FLAT_MARKET, FLOOR_BROKEN, INSUFFICIENT_POINTS,
+                                MARGIN_TOO_THIN, SPAN_TOO_SHORT, STALE,
+                                TOO_FEW_BOUNCES, StrategyParams,
+                                _count_touches, _floor_is_drifting, analyze,
+                                decide, should_buy, should_sell, target_price)
 
 
 def _series(prices, start="2026-05-01", freq="6h"):
@@ -104,3 +108,91 @@ def test_thin_history_holds():
     v = analyze(s, s.index[-1], PARAMS)
     assert not v.is_reliable
     assert not should_buy(v)
+    d = decide(s, s.index[-1], PARAMS)
+    assert d.action == SKIP and INSUFFICIENT_POINTS in d.codes
+
+
+# ---- explicit SKIP gates ----
+
+def test_flat_market_is_skipped():
+    s = _series([5_000.0] * 40)
+    d = decide(s, s.index[-1], PARAMS)
+    assert d.action == SKIP and FLAT_MARKET in d.codes
+
+
+def test_short_span_is_skipped_even_with_many_points():
+    s = _series(_sawtooth(n=48), freq="30min")   # 48 pts but only ~1 day of history
+    d = decide(s, s.index[-1], PARAMS)
+    assert d.action == SKIP and SPAN_TOO_SHORT in d.codes
+
+
+def test_stale_data_is_skipped():
+    s = _series(_sawtooth())
+    d = decide(s, s.index[-1] + pd.Timedelta(hours=72), PARAMS)
+    assert d.action == SKIP and STALE in d.codes
+
+
+def test_thin_margin_is_skipped_even_at_the_floor():
+    # a tidy range whose whole span nets < 1% after the 5% tax: never worth it
+    cycle = [10_000, 10_150, 10_300, 10_450, 10_600, 10_450, 10_300, 10_150]
+    s = _series(cycle * 8)   # 64 pts * 6h = 16 days
+    d = decide(s, s.index[-1], PARAMS)
+    assert d.action == SKIP and MARGIN_TOO_THIN in d.codes
+    assert d.view.net_margin_pct < 1.0
+
+
+def test_price_through_the_stop_level_is_never_a_buy():
+    # a valid rebounder whose price then knifes BELOW the floor: entering here
+    # would trip the stop immediately, so the engine must refuse the entry
+    p = StrategyParams(window_days=30, min_bounces=2, buy_zone_pct=4,
+                       target_pct=12, stop_pct=8)
+    prices = _sawtooth() + [33_000]      # floor ≈ 40.8k, stop level ≈ 37.6k
+    s = _series(prices)
+    d = decide(s, s.index[-1], p)
+    assert d.action == SKIP and FLOOR_BROKEN in d.codes
+
+
+def test_current_crash_does_not_drag_the_floor_down():
+    # the floor is judged on how long prices HELD, and the point at `at` holds
+    # for 0s — so a fresh crash can't soften its own entry test
+    prices = [5_000, 5_100, 5_200] * 13 + [3_000]
+    s = _series(prices)
+    d = decide(s, s.index[-1], PARAMS)
+    assert d.view.floor == 5_000            # not dragged toward 3,000
+    assert d.action == SKIP                 # a one-way slide, never a rebounder
+    assert TOO_FEW_BOUNCES in d.codes
+
+
+# ---- primitive spot-checks ----
+
+def test_touch_hysteresis_counts_distinct_visits_once():
+    # floor 100, tol 3%: touch band <=103, re-arm at >=106
+    assert _count_touches([102, 104, 102, 107, 101], 100.0, 3.0) == 2
+    # wiggling inside the band never re-arms: one touch
+    assert _count_touches([101, 103, 102, 103, 101], 100.0, 3.0) == 1
+    assert _count_touches([120, 118, 125], 100.0, 3.0) == 0
+
+
+def test_theil_sen_drift_detects_stairs_but_forgives_one_outlier():
+    p = StrategyParams(window_days=30, floor_drift_pct=10)
+    stairs = [(0.0, 1_000.0), (5.0, 900.0), (10.0, 800.0), (15.0, 700.0)]
+    assert _floor_is_drifting(stairs, 700.0, p)
+    # one bad low among stable ones must NOT read as a downtrend
+    outlier = [(0.0, 1_000.0), (5.0, 1_000.0), (10.0, 600.0), (15.0, 1_000.0)]
+    assert not _floor_is_drifting(outlier, 1_000.0, p)
+
+
+def test_sell_mode_either_takes_any_trigger_but_never_a_net_loss():
+    p = StrategyParams(sell_mode="either", target_pct=25, stop_pct=8,
+                       exit_band_pct=2, tax_rate=0.05)
+    entry, floor = 1_000, 950
+    # target: 1000*1.25/0.95 = 1315.8
+    assert should_sell(1_320, entry, floor, 2_000, p)[0]
+    # resistance band: ceiling 1200 -> fires from 1176, profitable net of tax
+    ok, why = should_sell(1_180, entry, floor, 1_200, p)
+    assert ok and "resistance" in why
+    # same price but entry too high: net loss -> resistance refuses to sell
+    assert should_sell(1_180, 1_150, floor, 1_200, p)[0] is False
+    # stop: floor*0.92 = 874
+    ok, why = should_sell(870, entry, floor, 1_200, p)
+    assert ok and ("stop" in why.lower() or "broke" in why.lower())

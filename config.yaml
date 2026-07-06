@@ -29,33 +29,48 @@ max_watchlist_size: 50
 database_path: data/market.db
 log_path: data/collector.log
 
-# Signal rule thresholds. The SAME rule is what the backtester scores and what
-# the live signal engine fires — tune here, re-backtest, then trust.
+# Tax used everywhere P&L is computed (targets, margins, backtests).
 signals:
-  buy_z: -1.5           # BUY when price is this many std devs below its 24h norm
-  sell_z: 1.5           # SELL when this many std devs above
-  event_guard_days: 2   # suppress BUY if a crashing event (SBC/PROMO/TOTW) is this close
-  momentum_guard_pct: 0 # opt-in momentum confirmation. >0 blocks buying a card still
-                        # falling >this% in 24h (falling knife) and holds a sell while
-                        # it's still rising >this%. Default 0 (off): prove it beats the
-                        # plain rule in `futmarket backtest` on YOUR data before enabling
-                        # (on coarse/daily history it tends to over-block dip-buys).
-  tax_rate: 0.05        # EA transfer-market sell tax, used in backtest P&L
+  tax_rate: 0.05        # EA transfer-market sell tax
 
-# Rebound strategy — the autonomous advisor. Buys cards that reliably bounce off a
-# floor, sells at a fixed net-of-tax profit target. Backtest it (`futmarket
-# backtest --strategy rebound`) before trusting the alerts.
+# The unified decision engine — one decide() shared by the advisor, the
+# discovery scanner, and the backtester. It outputs BUY / SELL / SKIP with the
+# failed gates named. Backtest it (`futmarket backtest`) before trusting alerts.
 strategy:
   window_days: 30           # how much history defines the floor + counts bounces
-  min_bounces: 3            # rebounds in that window to qualify as a reliable bouncer
+  min_bounces: 3            # completed rebounds in the window to call a card a reliable bouncer
   buy_zone_pct: 3           # "near the floor" = current price within this % of the floor
-  sell_mode: target         # "target" = sell at a fixed % profit; "resistance" = ride to the ceiling
-  target_pct: 25            # target mode: SELL when up this % net of the 5% tax vs the buy price
-  resistance_pctile: 80     # resistance mode: the ceiling = this percentile of the range's prices
+  sell_mode: either         # "target" = fixed % profit; "resistance" = ride to the ceiling;
+                            # "either" = whichever triggers first (stop applies in every mode)
+  target_pct: 25            # SELL when up this % net of the 5% tax vs the buy price
+  resistance_pctile: 80     # the ceiling = this duration-weighted percentile of the range
   stop_pct: 8               # SELL (bail) if price falls this % below the floor; 0 = no stop
-  floor_drift_pct: 10       # reject as a downtrend only if rebound-troughs keep dropping >this%
-                            # (the launch crash is ignored — only the bounce lows are judged)
+  floor_pctile: 15          # the floor = this duration-weighted percentile of the range
+  floor_drift_pct: 10       # reject as a downtrend if dip-lows trend down >this% per window
+                            # (Theil–Sen fit over dip lows — one outlier can't fake a trend)
+  touch_tol_pct: 3          # a floor "touch" = price within this % of the floor
+  min_touches: 3            # distinct touches needed to call the support validated
+  z_buy: 0.5                # BUY needs robust z <= -this (duration-weighted median/MAD).
+                            # Deliberately gentler than the floor gate: at the 15th-pctile
+                            # floor z is already ~-0.9 on a uniform range; a bigger z_buy
+                            # double-gates the same condition and starves entries.
+  cv_max: 0.60              # SKIP if the robust coefficient of variation exceeds this.
+                            # A chaos rail, not a tight filter: a healthy wide-range
+                            # rebounder runs CV 0.4-0.6 (its range IS dispersion);
+                            # touches/bounces/drift do the structure filtering.
+  min_margin_pct: 8         # SKIP if floor→ceiling nets less than this % after the 5% tax
+  min_points: 10            # SKIP with fewer weighted samples in the window
+  min_span_hours: 168       # SKIP with less than this much wall-clock history (7 days)
+  max_stale_hours: 48       # SKIP if the newest price is older than this
+  exit_band_pct: 2          # resistance exit fires within this % below the ceiling
+  event_guard_days: 2       # SKIP a BUY if a crashing event (SBC/PROMO/TOTW) is this close
+  max_gap_hours: 48         # cap on one sample's time-weight (long stale plateaus)
   momentum_screen_limit: 8  # also screen this many fut.gg momentum movers/cycle; 0 = watchlist only
+
+# Backtest promotion: besides beating every baseline's total return, the
+# candidate's max drawdown may be at most this multiple of the worst baseline's.
+backtest:
+  max_dd_multiple: 1.0
 
 # Where signals go. destination: console (default) or discord.
 # For discord, paste an incoming-webhook URL — sending publishes externally, so

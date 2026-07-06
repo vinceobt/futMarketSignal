@@ -22,6 +22,7 @@ from ..collectors import momentum_source
 from ..collectors.base import SourceError
 from ..collectors.turnstile_source import TurnstileMockSource
 from ..features import to_series
+from ..signals import BUY
 from . import watch
 
 log = logging.getLogger("futmarket.scanner")
@@ -68,14 +69,15 @@ def scan(conn, config: Config, source: str, *, add: bool = True,
         series = to_series(db.snapshots(conn, m.player_id, source))
         if series.empty:
             continue
-        view = strategy.analyze(series, series.index[-1], params)
+        decision = strategy.decide(series, series.index[-1], params)
+        view = decision.view
         if view.is_reliable:
             found.append(m.name)
-            # Only auto-track cards that are actionable NOW — reliable rebounder AND
-            # currently in the buy-zone — to keep the watchlist lean. A reliable card
-            # sitting above its floor is left untracked; a later scan picks it up when
-            # it dips into the zone.
-            if add and strategy.should_buy(view) and db.watchlist_count(conn) < config.max_watchlist_size:
+            # Only auto-track cards that are actionable NOW — a full BUY decision
+            # (validated floor, cheap z, real net margin) — to keep the watchlist
+            # lean. A reliable card sitting above its floor is left untracked; a
+            # later scan picks it up when it dips into the zone.
+            if add and decision.action == BUY and db.watchlist_count(conn) < config.max_watchlist_size:
                 try:
                     watch.add(conn, config, m.url)
                     added.append(m.name)
