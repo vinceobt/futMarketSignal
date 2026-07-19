@@ -167,6 +167,19 @@ def cmd_build_registry(args) -> None:
           f"({res['tradeable']} tradeable); {total} total in card_meta")
 
 
+def cmd_score_liquidity(args) -> None:
+    from .services import liquidity
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    if db.card_count(conn) == 0:
+        sys.exit("card_meta is empty — run `futmarket build-registry` first")
+    source = args.source  # None = across all sources
+    res = liquidity.refresh_liquidity(conn, source=source, window_days=args.window_days)
+    print(f"liquidity scored: A={res['A']} B={res['B']} C={res['C']}  "
+          f"(measured={res['measured']}, provisional={res['provisional']})")
+
+
 def cmd_features(args) -> None:
     from . import features
     config = _load(args)
@@ -527,6 +540,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--delay", type=float, default=0.5,
                    help="seconds between page fetches (politeness)")
     p.set_defaults(func=cmd_build_registry)
+
+    p = sub.add_parser("score-liquidity",
+                       help="score card_meta into A/B/C tradeability tiers (rule #1)")
+    p.add_argument("--source", default=None,
+                   help="price source for activity (default: across all sources)")
+    p.add_argument("--window-days", type=int, default=14,
+                   help="trailing window for the activity measure")
+    p.set_defaults(func=cmd_score_liquidity)
 
     p = sub.add_parser("build-features", help="compute + persist the features table")
     p.add_argument("--source", default=None, help="price source to use (default: most-populated)")
