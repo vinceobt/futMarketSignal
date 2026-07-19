@@ -4,3 +4,6 @@ __pycache__/
 //data/
 *.egg-info/
 .pytest_cache/
+# Trained model artifacts are regenerable outputs of `futmarket train`,
+# not source. The model_runs table records which artifact produced which metrics.
+data/models/

@@ -182,6 +182,51 @@ def cmd_collect_bulk(args) -> None:
           f"({res['unknown']:,} priced ids not in registry)")
 
 
+def cmd_train(args) -> None:
+    from .ml import train as train_mod
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    source = _resolve_source(conn, args.source, config)
+    print(f"training on source={source!r}, horizon={args.horizon}d "
+          f"(walk-forward, {args.splits} folds)...")
+    res = train_mod.train(conn, source=source, horizon=args.horizon,
+                          target_pct=config.strategy_target_pct,
+                          stop_pct=config.strategy_stop_pct,
+                          tax_rate=config.tax_rate, n_splits=args.splits)
+    if "error" in res:
+        sys.exit(res["error"])
+
+    print(f"\ndata: {res['rows']:,} rows, {res['cards']:,} cards\n")
+
+    f = res["forecast"]
+    print("FORECASTER (price move + confidence band)")
+    if f.get("folds"):
+        verdict = "BEATS baseline" if f["beat_baseline"] else "does NOT beat baseline"
+        print(f"  folds              {f['folds']}")
+        print(f"  MAE                {f['mae']}%  (baseline {f['baseline_mae']}%)")
+        print(f"  skill vs baseline  {f['skill_vs_baseline_pct']}%   -> {verdict}")
+        print(f"  band coverage      {f['band_coverage_p10_p90']:.1%} (target ~80%)")
+    else:
+        print(f"  {f.get('note', 'not evaluated')}")
+
+    d = res["direction"]
+    print("\nDIRECTION (will a trade hit target before stop?)")
+    if d.get("folds"):
+        verdict = "BEATS base rate" if d["beat_baseline"] else "does NOT beat base rate"
+        print(f"  folds              {d['folds']}")
+        print(f"  avg precision      {d['avg_precision']}  (base rate {d['base_rate']})")
+        print(f"  lift vs base rate  {d['lift_vs_base_rate']}x   -> {verdict}")
+        print(f"  precision @top 10% {d['precision_at_top_decile']:.1%}")
+    else:
+        print(f"  {d.get('note', 'not evaluated')}")
+
+    if res["runs"]:
+        print("\nregistered runs:")
+        for kind, info in res["runs"].items():
+            print(f"  {kind:<9} run_id={info['run_id']}  {info['artifact']}")
+
+
 def cmd_build_dataset(args) -> None:
     from .ml import dataset
     config = _load(args)
@@ -638,6 +683,13 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("collect-bulk",
                    help="snapshot the whole market's prices in one pass (fut.gg bulk CDN)"
                    ).set_defaults(func=cmd_collect_bulk)
+
+    p = sub.add_parser("train",
+                       help="train + walk-forward validate the forecast and direction models")
+    p.add_argument("--source", default=None)
+    p.add_argument("--horizon", type=int, default=7, help="label horizon in days")
+    p.add_argument("--splits", type=int, default=4, help="walk-forward folds")
+    p.set_defaults(func=cmd_train)
 
     p = sub.add_parser("build-dataset",
                        help="assemble the ML feature matrix (card + cohort + lifecycle)")
