@@ -22,7 +22,6 @@ from ..collectors import momentum_source
 from ..collectors.base import SourceError
 from ..collectors.turnstile_source import TurnstileMockSource
 from ..features import to_series
-from ..signals import BUY
 from . import watch
 
 log = logging.getLogger("futmarket.scanner")
@@ -73,11 +72,13 @@ def scan(conn, config: Config, source: str, *, add: bool = True,
         view = decision.view
         if view.is_reliable:
             found.append(m.name)
-            # Only auto-track cards that are actionable NOW — a full BUY decision
-            # (validated floor, cheap z, real net margin) — to keep the watchlist
-            # lean. A reliable card sitting above its floor is left untracked; a
-            # later scan picks it up when it dips into the zone.
-            if add and decision.action == BUY and db.watchlist_count(conn) < config.max_watchlist_size:
+            # Track every reliable rebounder immediately, not just ones in a full
+            # BUY state right now. Discovery runs every few hours, but floor-dips
+            # last hours too — "wait for a later scan to catch the dip" misses the
+            # window almost every time (and the card may have left the momentum
+            # feed by then). Once tracked, the 20-min collect+advise loop watches
+            # it and fires the BUY the moment it actually dips to its floor.
+            if add and db.watchlist_count(conn) < config.max_watchlist_size:
                 try:
                     watch.add(conn, config, m.url)
                     added.append(m.name)
@@ -85,8 +86,8 @@ def scan(conn, config: Config, source: str, *, add: bool = True,
                     pass
 
     if add and added and alerter is not None:
-        alerter.send("📡 discovery: now tracking " + str(len(added)) +
-                     " new range-bound card(s): " + ", ".join(added))
+        alerter.send("📡 discovery: now watching " + str(len(added)) +
+                     " range-bound card(s) for a dip to their floor: " + ", ".join(added))
     summary = {"scanned": scanned, "reliable": found, "added": added}
     log.info("scan done scanned=%d reliable=%d added=%d", scanned, len(found), len(added))
     return summary

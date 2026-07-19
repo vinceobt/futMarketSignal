@@ -118,18 +118,21 @@ def cmd_players(args) -> None:
               f"{version:<22} snapshots={row['n']:<4} last={row['last'] or '-'}")
 
 
-def _resolve_source(conn, requested: str | None) -> str:
+def _resolve_source(conn, requested: str | None, config=None) -> str:
     """Which stored price series to build features from. Explicit --source wins;
     otherwise pick the source holding the most snapshots (the one you actually
-    have data for)."""
+    have data for). On a fresh/empty DB fall back to the configured collection
+    source so discovery can bootstrap (e.g. right after a clean-slate wipe)."""
     if requested:
         return requested
     row = conn.execute(
         "SELECT source, COUNT(*) AS n FROM price_snapshots "
         "GROUP BY source ORDER BY n DESC LIMIT 1").fetchone()
-    if row is None:
-        sys.exit("no price snapshots stored yet — log or collect some first")
-    return row["source"]
+    if row is not None:
+        return row["source"]
+    if config is not None:
+        return config.source
+    sys.exit("no price snapshots stored yet — log or collect some first")
 
 
 def _fmt(v, spec=".2f"):
@@ -141,7 +144,7 @@ def cmd_build_features(args) -> None:
     config = _load(args)
     setup_logging(config.log_path)
     conn = db.connect(config.database_path)
-    source = _resolve_source(conn, args.source)
+    source = _resolve_source(conn, args.source, config)
     written = features.build_and_store(conn, config, source)
     print(f"built {written} feature rows from source={source!r}")
 
@@ -151,7 +154,7 @@ def cmd_features(args) -> None:
     config = _load(args)
     conn = db.connect(config.database_path)
     entry = _watchlist_entry(conn, config, args.player_id)
-    source = _resolve_source(conn, args.source)
+    source = _resolve_source(conn, args.source, config)
     table = features.compute_feature_table(conn, entry.player_id, source)
     if not table:
         print(f"no {source!r} snapshots for {entry.player_id!r} yet")
@@ -236,7 +239,7 @@ def cmd_advise(args) -> None:
     config = _load(args)
     setup_logging(config.log_path)
     conn = db.connect(config.database_path)
-    source = _resolve_source(conn, args.source)
+    source = _resolve_source(conn, args.source, config)
     res = advisor.run(conn, config, source, dry_run=args.dry_run)
     tag = "would " if args.dry_run else ""
     for o in res["opened"]:
@@ -256,17 +259,17 @@ def cmd_scan_momentum(args) -> None:
     config = _load(args)
     setup_logging(config.log_path)
     conn = db.connect(config.database_path)
-    source = _resolve_source(conn, args.source)
+    source = _resolve_source(conn, args.source, config)
     alerter = None if args.dry_run else alertmod.get_alerter(config)
     print(f"scanning fut.gg momentum for new range-bound cards "
           f"(up to {config.strategy_momentum_screen_limit})…")
     res = scanner.scan(conn, config, source, add=not args.dry_run, alerter=alerter)
     if res["added"]:
-        print(f"tracking {len(res['added'])} new (at their floor now): {', '.join(res['added'])}")
+        print(f"now watching {len(res['added'])} for a dip to their floor: {', '.join(res['added'])}")
     waiting = [n for n in res["reliable"] if n not in res["added"]]
     if waiting:
-        note = "dry-run" if args.dry_run else "reliable but above buy-zone — will add on a dip"
-        print(f"watching {len(waiting)} for a dip ({note}): {', '.join(waiting)}")
+        note = "dry-run" if args.dry_run else "not added — watchlist full or add failed"
+        print(f"reliable but untracked ({note}): {', '.join(waiting)}")
     print(f"\nscanned {res['scanned']} untracked movers · "
           f"reliable {len(res['reliable'])} · added {len(res['added'])}")
 
@@ -306,7 +309,7 @@ def cmd_backtest(args) -> None:
     from .strategy import StrategyParams
     config = _load(args)
     conn = db.connect(config.database_path)
-    source = _resolve_source(conn, args.source)
+    source = _resolve_source(conn, args.source, config)
     from dataclasses import replace
     tax = args.tax if args.tax is not None else config.tax_rate
     strat_params = StrategyParams.from_config(config)
@@ -354,7 +357,7 @@ def cmd_signals(args) -> None:
     config = _load(args)
     setup_logging(config.log_path)
     conn = db.connect(config.database_path)
-    source = _resolve_source(conn, args.source)
+    source = _resolve_source(conn, args.source, config)
     res = analytics.run_signals(conn, config, source)
     if not res["signals"]:
         print(f"no price history available in source={source!r}")
@@ -373,7 +376,7 @@ def cmd_alert(args) -> None:
     config = _load(args)
     setup_logging(config.log_path)
     conn = db.connect(config.database_path)
-    source = _resolve_source(conn, args.source)
+    source = _resolve_source(conn, args.source, config)
     try:
         alerter = alertmod.get_alerter(config)
     except ValueError as exc:

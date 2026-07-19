@@ -40,18 +40,31 @@ def _coins(n) -> str:
     return str(round(n))
 
 
+def _card_tag(rating: int | None, version: str | None) -> str:
+    """Card-identity suffix so you never buy the wrong version — e.g.
+    " · 94 Team of the Season". Empty when neither field is known."""
+    bits = [str(rating)] if rating else []
+    if version:
+        bits.append(version)
+    return f" · {' '.join(bits)}" if bits else ""
+
+
 def format_trade_alert(kind: str, name: str, price: int, *, view=None,
                        target: int | None = None, realized_pct: float | None = None,
-                       reason: str = "") -> str:
-    """One-line BUY/SELL message for the rebound advisor (Discord/console)."""
+                       reason: str = "", rating: int | None = None,
+                       version: str | None = None) -> str:
+    """One-line BUY/SELL message for the rebound advisor (Discord/console).
+    `rating`/`version` identify the exact card (rating + special-card type/rarity,
+    e.g. "94 Team of the Season") so the wrong version can't be bought."""
+    tag = _card_tag(rating, version)
     if kind == "BUY":
         floor = f"~{_coins(view.floor)}" if view and view.floor else "its floor"
         tgt = f" → target {_coins(target)}" if target else ""
-        return (f"🟢 BUY {name} @ {_coins(price)} — bounced off {floor} "
+        return (f"🟢 BUY {name}{tag} @ {_coins(price)} — bounced off {floor} "
                 f"{getattr(view, 'bounces', '?')}× in-range{tgt}")
     # SELL
     pnl = f" ({realized_pct:+.1f}% net)" if realized_pct is not None else ""
-    return f"🔴 SELL {name} @ {_coins(price)}{pnl} — {reason}"
+    return f"🔴 SELL {name}{tag} @ {_coins(price)}{pnl} — {reason}"
 
 
 def format_digest(alerts: list[Alert], date_str: str) -> str:

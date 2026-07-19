@@ -84,12 +84,9 @@ alerts:
 # Open the player on https://www.fut.gg, copy the address bar, and add it here.
 # The app derives a stable id + display name from the URL, and fills in the
 # rating/version by reading the page. Edit freely; cap is 50.
-watchlist:
-  - https://www.fut.gg/players/241637-aurelien-tchouameni/26-100904933/
-  - https://www.fut.gg/players/251854-pedri/26-100915150/
-  - https://www.fut.gg/players/239053-federico-valverde/26-151233997/
-  - https://www.fut.gg/players/234378-declan-rice/26-134452106/
-  - https://www.fut.gg/players/203376-virgil-van-dijk/26-117643888/
-  - https://www.fut.gg/players/237646-daniel-munoz/26-50569294/
-  - https://www.fut.gg/players/258601-mamadou-sangare/26-67367465/
+#
+# Left empty on purpose: this build runs on momentum auto-discovery — the 6h
+# scanner tracks range-bound fut.gg movers automatically, so no manual list is
+# needed. Add URLs here only if you want to force-track specific cards.
+watchlist: []
 

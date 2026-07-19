@@ -29,6 +29,21 @@ def _series(conn, player_id: str, source: str) -> pd.Series:
     return to_series(db.snapshots(conn, player_id, source))
 
 
+def _card_meta(conn, player_id: str) -> tuple[int | None, str | None]:
+    """(rating, version) identifying the exact card, so a BUY/SELL names the
+    right version. Prefer the players table (enriched at scrape time); fall back
+    to the momentum cache's rating/rarity for a freshly-discovered mover."""
+    row = conn.execute(
+        "SELECT rating, version FROM players WHERE player_id=?", (player_id,)).fetchone()
+    if row and (row["rating"] or row["version"]):
+        return row["rating"], row["version"]
+    m = conn.execute(
+        "SELECT rating, rarity FROM momentum WHERE player_id=?", (player_id,)).fetchone()
+    if m:
+        return m["rating"], m["rarity"]
+    return None, None
+
+
 def _candidates(conn, config: Config, source: str) -> list[tuple[str, str]]:
     """(player_id, name) to analyze this cycle: the watchlist, plus up to
     strategy_momentum_screen_limit fut.gg movers we already have history for.
@@ -70,7 +85,9 @@ def run(conn, config: Config, source: str, *, dry_run: bool = False,
                 tgt = int(strategy.target_price(price, params))
                 stop = strategy.stop_price(view.floor, params)
                 stop = int(stop) if stop else None
-                msg = alertmod.format_trade_alert("BUY", name, price, view=view, target=tgt)
+                rating, version = _card_meta(conn, player_id)
+                msg = alertmod.format_trade_alert("BUY", name, price, view=view,
+                                                  target=tgt, rating=rating, version=version)
                 opened.append({"player_id": player_id, "name": name, "price": price,
                                "target": tgt, "msg": msg})
                 if not dry_run:
@@ -92,8 +109,10 @@ def run(conn, config: Config, source: str, *, dry_run: bool = False,
             if decision.action == SELL:
                 why = decision.detail
                 realized = (price * (1 - params.tax_rate) / entry - 1.0) * 100.0
+                rating, version = _card_meta(conn, player_id)
                 msg = alertmod.format_trade_alert("SELL", name, price,
-                                                  realized_pct=realized, reason=why)
+                                                  realized_pct=realized, reason=why,
+                                                  rating=rating, version=version)
                 closed.append({"player_id": player_id, "name": name, "price": price,
                                "realized_pct": round(realized, 1), "msg": msg})
                 if not dry_run:
