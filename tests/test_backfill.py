@@ -103,6 +103,24 @@ def test_backfill_is_idempotent(conn):
     assert second["inserted"] == 0 and second["points"] == 2
 
 
+def test_order_oldest_prioritises_long_histories(conn):
+    """'oldest' walks earliest-released cards first — the de-skew for a
+    recency-heavy training set — regardless of liquidity tier."""
+    futdb.upsert_card_meta(conn, {"player_id": "new-liquid", "definition_id": 1,
+                                  "release_date": "2026-07-01", "rating": 95})
+    futdb.upsert_card_meta(conn, {"player_id": "old-dull", "definition_id": 2,
+                                  "release_date": "2025-09-08", "rating": 70})
+    futdb.upsert_liquidity(conn, player_id="new-liquid", score=9.0, tier="A")
+    futdb.upsert_liquidity(conn, player_id="old-dull", score=1.0, tier="C")
+    conn.commit()
+
+    by_liquidity = [r["player_id"] for r in futdb.cards_for_backfill(conn)]
+    by_oldest = [r["player_id"] for r in
+                 futdb.cards_for_backfill(conn, order="oldest")]
+    assert by_liquidity[0] == "new-liquid"   # tier A first
+    assert by_oldest[0] == "old-dull"        # earliest release first
+
+
 def test_backfill_skips_already_backfilled(conn):
     from datetime import datetime, timedelta, timezone
     _seed(conn)

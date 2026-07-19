@@ -49,6 +49,7 @@ def _fetch_with_backoff(def_id: int, game: str, client: httpx.Client, *,
 def backfill_history(conn, *, source: str = BULK_SOURCE,
                      tiers: tuple[str, ...] | None = None,
                      limit: int | None = None, delay: float = 1.0,
+                     order: str = "liquidity",
                      max_consecutive_failures: int = 5,
                      skip_existing: bool = True, min_existing: int = 10,
                      client: httpx.Client | None = None,
@@ -60,7 +61,7 @@ def backfill_history(conn, *, source: str = BULK_SOURCE,
     so we skip it rather than re-request and risk a needless 429."""
     # When resuming, `limit` should bound cards we actually *fetch*, so pull the
     # ordered list and skip-then-count rather than truncating up front.
-    cards = db.cards_for_backfill(conn, tiers=tiers,
+    cards = db.cards_for_backfill(conn, tiers=tiers, order=order,
                                   limit=None if skip_existing else limit)
     own_client = client is None
     client = client or httpx.Client(timeout=25.0, headers=history_source._HEADERS)

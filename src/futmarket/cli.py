@@ -301,7 +301,8 @@ def cmd_backfill_history(args) -> None:
     print(f"backfilling daily history"
           f"{' (tiers %s)' % ','.join(tiers) if tiers else ' (liquid-first)'}"
           f"{', limit %d' % args.limit if args.limit else ''}...")
-    res = backfill.backfill_history(conn, tiers=tiers, limit=args.limit, delay=args.delay)
+    res = backfill.backfill_history(conn, tiers=tiers, limit=args.limit,
+                                    delay=args.delay, order=args.order)
     print(f"backfill: {res['cards']} cards, {res['inserted']:,} new snapshots "
           f"from {res['points']:,} points ({res['failed']} failed, {res['skipped']} skipped)")
 
@@ -716,6 +717,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--limit", type=int, default=None, help="cap cards backfilled")
     p.add_argument("--delay", type=float, default=1.0,
                    help="seconds between cards (politeness)")
+    p.add_argument("--order", choices=["liquidity", "oldest"], default="liquidity",
+                   help="'oldest' prioritises earliest-released cards (longest "
+                        "histories) — use it to de-skew a recency-heavy training set")
     p.set_defaults(func=cmd_backfill_history)
 
     p = sub.add_parser("score-liquidity",
