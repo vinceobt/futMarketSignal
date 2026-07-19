@@ -189,11 +189,16 @@ def cmd_build_calendar(args) -> None:
     conn = db.connect(config.database_path)
     if db.card_count(conn) == 0:
         sys.exit("card_meta is empty — run `futmarket build-registry` first")
-    print("building the game calendar (promos/TOTW from card releases"
-          f"{', SBCs from fut.gg' if not args.no_sbc else ''})...")
-    res = calendar.build_calendar(conn, include_sbc=not args.no_sbc)
+    parts = ["promos/TOTW from card releases"]
+    if not args.no_sbc:
+        parts.append("SBCs from fut.gg")
+    if not args.no_news:
+        parts.append("announcements from EA news")
+    print(f"building the game calendar ({', '.join(parts)})...")
+    res = calendar.build_calendar(conn, include_sbc=not args.no_sbc,
+                                  include_news=not args.no_news)
     print(f"calendar: launch {res['launch']}, {res['promo']} promos, "
-          f"{res['totw']} TOTW drops, {res['sbc']} SBCs")
+          f"{res['totw']} TOTW drops, {res['sbc']} SBCs, {res['news']} EA articles")
 
 
 def cmd_events(args) -> None:
@@ -610,8 +615,8 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("build-calendar",
                        help="derive the promo/TOTW/SBC calendar (lifecycle backbone)")
-    p.add_argument("--no-sbc", action="store_true",
-                   help="skip the fut.gg SBC feed (card-release events only)")
+    p.add_argument("--no-sbc", action="store_true", help="skip the fut.gg SBC feed")
+    p.add_argument("--no-news", action="store_true", help="skip the EA news feed")
     p.set_defaults(func=cmd_build_calendar)
 
     p = sub.add_parser("events", help="list the market event calendar")

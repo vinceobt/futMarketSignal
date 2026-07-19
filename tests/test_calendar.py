@@ -114,11 +114,12 @@ def test_build_calendar_persists_and_is_idempotent(conn):
              "endTime": "2026-01-12T00:00:00Z"}], "next": None})
     client = httpx.Client(transport=httpx.MockTransport(handler))
 
-    first = calendar.build_calendar(conn, sbc_client=client, delay=0)
+    first = calendar.build_calendar(conn, sbc_client=client, delay=0,
+                                    include_news=False)
     assert first["promo"] == 1 and first["sbc"] == 1 and first["launch"] == "2025-12-01"
 
     client2 = httpx.Client(transport=httpx.MockTransport(handler))
-    calendar.build_calendar(conn, sbc_client=client2, delay=0)
+    calendar.build_calendar(conn, sbc_client=client2, delay=0, include_news=False)
     # rebuild replaces rather than duplicating
     assert len(futdb.events_list(conn)) == 2
 
@@ -130,6 +131,6 @@ def test_rebuild_preserves_manual_events(conn):
                        notes="hand-logged gameplay patch")
     conn.commit()
 
-    calendar.build_calendar(conn, include_sbc=False)
+    calendar.build_calendar(conn, include_sbc=False, include_news=False)
     types = {r["event_type"] for r in futdb.events_list(conn)}
     assert "PATCH" in types and "PROMO" in types   # manual row survived the rebuild

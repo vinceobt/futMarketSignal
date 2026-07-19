@@ -17,12 +17,13 @@ from __future__ import annotations
 import logging
 
 from .. import db
-from ..collectors import sbc_source
+from ..collectors import ea_news_source, sbc_source
 
 logger = logging.getLogger(__name__)
 
 DERIVED_SOURCE = "derived_cards"
 SBC_SOURCE = "futgg_sbc"
+NEWS_SOURCE = "ea_news"
 
 # Base-rarity cards ship with the game; their release is the launch, not a promo.
 BASE_VERSIONS = {"common", "rare", "bronze", "silver", "gold",
@@ -93,9 +94,14 @@ def set_launch_from_registry(conn, *, title: str = "fc26") -> str | None:
 
 
 def build_calendar(conn, *, title: str = "fc26", game: str = "26",
-                   include_sbc: bool = True, sbc_max_pages: int | None = None,
-                   sbc_client=None, delay: float = 0.4) -> dict:
-    """Rebuild the derived calendar: launch anchor + promo/TOTW + SBC windows."""
+                   include_sbc: bool = True, include_news: bool = True,
+                   sbc_max_pages: int | None = None, news_max_pages: int | None = None,
+                   sbc_client=None, news_client=None, delay: float = 0.4) -> dict:
+    """Rebuild the derived calendar from all three timelines.
+
+    Each source is stored separately and means something different: card releases
+    = when a promo hit the market, EA news = when it was announced (plus patches
+    and Season rollovers), SBC = the challenge windows that crash fodder."""
     launch = set_launch_from_registry(conn, title=title)
 
     card_events = derive_card_release_events(conn, title=title)
@@ -107,11 +113,18 @@ def build_calendar(conn, *, title: str = "fc26", game: str = "26",
                                                delay=delay, client=sbc_client))
         db.replace_events(conn, source=SBC_SOURCE, events=sbc_events, title=title)
 
+    news_events: list[dict] = []
+    if include_news:
+        news_events = list(ea_news_source.iter_news(max_pages=news_max_pages,
+                                                    delay=delay, client=news_client))
+        db.replace_events(conn, source=NEWS_SOURCE, events=news_events, title=title)
+
     res = {
         "launch": launch,
         "promo": sum(1 for e in card_events if e["event_type"] == "PROMO"),
         "totw": sum(1 for e in card_events if e["event_type"] == "TOTW"),
         "sbc": len(sbc_events),
+        "news": len(news_events),
     }
     logger.info("calendar built: %s", res)
     return res
