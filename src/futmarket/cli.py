@@ -167,6 +167,21 @@ def cmd_build_registry(args) -> None:
           f"({res['tradeable']} tradeable); {total} total in card_meta")
 
 
+def cmd_collect_bulk(args) -> None:
+    from .services import bulk_collect
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    if db.card_count(conn) == 0:
+        sys.exit("card_meta is empty — run `futmarket build-registry` first")
+    print(f"fetching whole-market prices ({config.platform})...")
+    res = bulk_collect.collect_bulk(conn, platform=config.platform)
+    print(f"bulk collect: fetched {res['fetched']:,} prices, "
+          f"matched {res['matched']:,} tracked cards, "
+          f"inserted {res['inserted']:,} new snapshots "
+          f"({res['unknown']:,} priced ids not in registry)")
+
+
 def cmd_score_liquidity(args) -> None:
     from .services import liquidity
     config = _load(args)
@@ -540,6 +555,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--delay", type=float, default=0.5,
                    help="seconds between page fetches (politeness)")
     p.set_defaults(func=cmd_build_registry)
+
+    sub.add_parser("collect-bulk",
+                   help="snapshot the whole market's prices in one pass (fut.gg bulk CDN)"
+                   ).set_defaults(func=cmd_collect_bulk)
 
     p = sub.add_parser("score-liquidity",
                        help="score card_meta into A/B/C tradeability tiers (rule #1)")
