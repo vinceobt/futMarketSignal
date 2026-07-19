@@ -437,6 +437,14 @@ def latest_snapshot_time(conn: sqlite3.Connection, player_id: str,
     return datetime.strptime(row["ts"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
+def snapshot_count(conn: sqlite3.Connection, player_id: str, source: str) -> int:
+    """How many snapshots a card has for a source — used to tell a backfilled
+    card (deep history) from a spot-only one (a handful of points)."""
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM price_snapshots WHERE player_id=? AND source=?",
+        (player_id, source)).fetchone()["n"]
+
+
 def history(conn: sqlite3.Connection, player_id: str, limit: int = 50) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT timestamp, price, source FROM price_snapshots "

@@ -26,6 +26,10 @@ from .base import SourceError
 
 logger = logging.getLogger(__name__)
 
+
+class RateLimited(SourceError):
+    """HTTP 429 — the source is throttling us; back off and retry."""
+
 _BASE = "https://www.fut.gg"
 _SIGN_PATH = "/api/fut/price-access/sign/"
 _HISTORY_PATH = "/api/fut/player-prices/{game}/{def_id}/"
@@ -44,6 +48,8 @@ def _sign(def_id: int, game: str, client: httpx.Client) -> str:
     """Return the signed relative URL for a card's history, or raise SourceError."""
     protected = _HISTORY_PATH.format(game=game, def_id=def_id)
     resp = client.post(_BASE + _SIGN_PATH, json={"url": protected}, headers=_HEADERS)
+    if resp.status_code == 429:
+        raise RateLimited(f"sign 429 for {def_id}")
     if resp.status_code != 200:
         raise SourceError(f"sign HTTP {resp.status_code} for {def_id}: {resp.text[:120]}")
     data = resp.json().get("data", {})
@@ -65,6 +71,8 @@ def fetch_history(def_id: int, game: str = "26", *,
     try:
         signed = _sign(def_id, game, client)
         resp = client.get(_BASE + signed, headers=_HEADERS)
+        if resp.status_code == 429:
+            raise RateLimited(f"history 429 for {def_id}")
         if resp.status_code != 200:
             raise SourceError(f"history HTTP {resp.status_code} for {def_id}")
         data = resp.json().get("data", {})

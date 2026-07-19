@@ -103,6 +103,52 @@ def test_backfill_is_idempotent(conn):
     assert second["inserted"] == 0 and second["points"] == 2
 
 
+def test_backfill_skips_already_backfilled(conn):
+    from datetime import datetime, timedelta, timezone
+    _seed(conn)
+    # a-liquid already has deep history (>= min_existing) -> should be skipped
+    for i in range(12):
+        futdb.insert_snapshot(conn, player_id="a-liquid", price=1000 + i, source="futgg",
+                              at=datetime(2026, 6, 1, tzinfo=timezone.utc) + timedelta(days=i))
+    conn.commit()
+    client = _history_client(history_by_id={
+        101: [("2026-07-03T00:00:00Z", 999)], 102: [("2026-07-03T00:00:00Z", 5000)]})
+    res = backfill.backfill_history(conn, client=client, delay=0)
+    assert res["already"] == 1        # a-liquid skipped (deep history)
+    assert res["cards"] == 1          # only b-mid backfilled
+
+
+def test_fetch_with_backoff_rides_out_429():
+    import json
+    state = {"sign_calls": 0}
+
+    def handler(request):
+        if request.url.path.endswith("/sign/"):
+            state["sign_calls"] += 1
+            if state["sign_calls"] <= 2:            # first two attempts throttled
+                return httpx.Response(429, text="slow down")
+            protected = json.loads(request.content.decode())["url"]
+            return httpx.Response(200, json={"data": {
+                "url": protected + "?verify=t", "challengeRequired": False}})
+        return httpx.Response(200, json={"data": {
+            "history": [{"date": "2026-07-03T00:00:00Z", "price": 100}]}})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    slept: list = []
+    pts = backfill._fetch_with_backoff(5, "26", client, base=0.01, sleep=slept.append)
+    assert [p for _, p in pts] == [100]
+    assert len(slept) == 2                          # backed off twice, then succeeded
+
+
+def test_fetch_with_backoff_gives_up_after_retries():
+    def handler(request):
+        return httpx.Response(429, text="nope")
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(history_source.RateLimited):
+        backfill._fetch_with_backoff(5, "26", client, retries=2, base=0.01,
+                                     sleep=lambda _s: None)
+
+
 def test_backfill_circuit_breaker(conn):
     # every card fails to sign -> breaker stops after N consecutive failures
     for i in range(10):
