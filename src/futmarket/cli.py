@@ -182,6 +182,32 @@ def cmd_collect_bulk(args) -> None:
           f"({res['unknown']:,} priced ids not in registry)")
 
 
+def cmd_build_dataset(args) -> None:
+    from .ml import dataset
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    source = _resolve_source(conn, args.source, config)
+    print(f"assembling the feature matrix from source={source!r}...")
+    frame = dataset.build_dataset(conn, source=source)
+    if frame.empty:
+        sys.exit("no data — run `futmarket backfill-history` first")
+
+    present = [c for c in dataset.FEATURE_COLUMNS if c in frame.columns]
+    print(f"dataset: {len(frame):,} rows x {frame.shape[1]} cols, "
+          f"{frame['player_id'].nunique():,} cards, "
+          f"{frame['date'].min()} .. {frame['date'].max()}")
+    print(f"features: {len(present)}")
+    coverage = frame[present].notna().mean().sort_values()
+    print("\nleast-populated features (coverage):")
+    for name, frac in coverage.head(6).items():
+        print(f"  {name:<24} {frac:6.1%}")
+    if args.out:
+        frame.to_parquet(args.out) if args.out.endswith(".parquet") else \
+            frame.to_csv(args.out, index=False)
+        print(f"\nwrote {args.out}")
+
+
 def cmd_build_calendar(args) -> None:
     from .services import calendar
     config = _load(args)
@@ -612,6 +638,13 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("collect-bulk",
                    help="snapshot the whole market's prices in one pass (fut.gg bulk CDN)"
                    ).set_defaults(func=cmd_collect_bulk)
+
+    p = sub.add_parser("build-dataset",
+                       help="assemble the ML feature matrix (card + cohort + lifecycle)")
+    p.add_argument("--source", default=None)
+    p.add_argument("--out", default=None,
+                   help="write the matrix to a .csv or .parquet file")
+    p.set_defaults(func=cmd_build_dataset)
 
     p = sub.add_parser("build-calendar",
                        help="derive the promo/TOTW/SBC calendar (lifecycle backbone)")

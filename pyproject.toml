@@ -16,6 +16,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 web = ["fastapi>=0.110", "uvicorn>=0.27"]
+# Histogram gradient boosting via scikit-learn (same family as LightGBM, but
+# needs no system OpenMP — sklearn bundles its own, so this installs clean on
+# macOS without Homebrew). Models sit behind an interface if we ever swap.
+ml = ["scikit-learn>=1.5", "joblib>=1.3", "scipy>=1.11"]
 
 [project.scripts]
 futmarket = "futmarket.cli:main"
