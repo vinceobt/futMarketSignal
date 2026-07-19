@@ -182,6 +182,33 @@ def cmd_collect_bulk(args) -> None:
           f"({res['unknown']:,} priced ids not in registry)")
 
 
+def cmd_build_calendar(args) -> None:
+    from .services import calendar
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    if db.card_count(conn) == 0:
+        sys.exit("card_meta is empty — run `futmarket build-registry` first")
+    print("building the game calendar (promos/TOTW from card releases"
+          f"{', SBCs from fut.gg' if not args.no_sbc else ''})...")
+    res = calendar.build_calendar(conn, include_sbc=not args.no_sbc)
+    print(f"calendar: launch {res['launch']}, {res['promo']} promos, "
+          f"{res['totw']} TOTW drops, {res['sbc']} SBCs")
+
+
+def cmd_events(args) -> None:
+    config = _load(args)
+    conn = db.connect(config.database_path)
+    rows = db.events_list(conn, event_type=args.type, limit=args.limit)
+    if not rows:
+        print("no events — run `futmarket build-calendar`")
+        return
+    for r in rows:
+        window = r["start_date"] + (f" -> {r['end_date']}" if r["end_date"] else "")
+        print(f"{r['event_type']:<6} {window:<26} {(r['notes'] or '')[:52]}")
+    print(f"\n{len(rows)} event(s)")
+
+
 def cmd_backfill_history(args) -> None:
     from .services import backfill
     config = _load(args)
@@ -580,6 +607,17 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("collect-bulk",
                    help="snapshot the whole market's prices in one pass (fut.gg bulk CDN)"
                    ).set_defaults(func=cmd_collect_bulk)
+
+    p = sub.add_parser("build-calendar",
+                       help="derive the promo/TOTW/SBC calendar (lifecycle backbone)")
+    p.add_argument("--no-sbc", action="store_true",
+                   help="skip the fut.gg SBC feed (card-release events only)")
+    p.set_defaults(func=cmd_build_calendar)
+
+    p = sub.add_parser("events", help="list the market event calendar")
+    p.add_argument("--type", default=None, help="PROMO | TOTW | SBC")
+    p.add_argument("--limit", type=int, default=40)
+    p.set_defaults(func=cmd_events)
 
     p = sub.add_parser("backfill-history",
                        help="backfill daily price history since release, liquid-first")

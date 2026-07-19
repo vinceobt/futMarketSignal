@@ -233,6 +233,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if "title" not in _column_names(conn, table):
             conn.execute(
                 f"ALTER TABLE {table} ADD COLUMN title TEXT NOT NULL DEFAULT 'fc26'")
+    # Where an event came from, so *derived* calendar rows can be rebuilt without
+    # touching events a human logged via `futmarket log-event`.
+    if "source" not in _column_names(conn, "market_events"):
+        conn.execute(
+            "ALTER TABLE market_events ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
     conn.commit()
 
 
@@ -478,6 +483,40 @@ def insert_event(conn: sqlite3.Connection, *, event_type: str, start_date: str,
         (event_type, player_id, start_date, end_date, notes),
     )
     return cur.lastrowid
+
+
+def replace_events(conn: sqlite3.Connection, *, source: str,
+                   events: list[dict], title: str = "fc26") -> int:
+    """Swap in a freshly derived event set for one source, leaving other sources
+    (notably hand-logged 'manual' events) untouched. Returns rows written."""
+    conn.execute("DELETE FROM market_events WHERE source=? AND title=?",
+                 (source, title))
+    conn.executemany(
+        "INSERT INTO market_events (event_type, player_id, start_date, end_date, "
+        "notes, title, source) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [(e["event_type"], e.get("player_id"), e["start_date"], e.get("end_date"),
+          e.get("notes"), title, source) for e in events],
+    )
+    conn.commit()
+    return len(events)
+
+
+def events_list(conn: sqlite3.Connection, *, title: str | None = None,
+                event_type: str | None = None,
+                limit: int | None = None) -> list[sqlite3.Row]:
+    clauses, params = [], []
+    if title is not None:
+        clauses.append("title=?")
+        params.append(title)
+    if event_type is not None:
+        clauses.append("event_type=?")
+        params.append(event_type)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    sql = f"SELECT * FROM market_events {where} ORDER BY start_date DESC, event_id DESC"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    return conn.execute(sql, tuple(params)).fetchall()
 
 
 def upcoming_events(conn: sqlite3.Connection, player_id: str,
