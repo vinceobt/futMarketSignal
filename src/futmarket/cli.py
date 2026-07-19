@@ -149,6 +149,24 @@ def cmd_build_features(args) -> None:
     print(f"built {written} feature rows from source={source!r}")
 
 
+def cmd_build_registry(args) -> None:
+    from .services import registry
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+
+    def progress(seen, tradeable):
+        print(f"  ...{seen} cards ({tradeable} tradeable)")
+
+    print(f"crawling fut.gg card list (game {args.game}"
+          f"{', max %d pages' % args.max_pages if args.max_pages else ''})...")
+    res = registry.refresh_registry(conn, game=args.game, max_pages=args.max_pages,
+                                    delay=args.delay, progress=progress)
+    total = db.card_count(conn)
+    print(f"registry: {res['seen']} cards this crawl "
+          f"({res['tradeable']} tradeable); {total} total in card_meta")
+
+
 def cmd_features(args) -> None:
     from . import features
     config = _load(args)
@@ -500,6 +518,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("player_id")
     p.add_argument("--source", default=None, help="price source to use (default: most-populated)")
     p.set_defaults(func=cmd_features)
+
+    p = sub.add_parser("build-registry",
+                       help="crawl fut.gg's full card list into the card_meta registry")
+    p.add_argument("--game", default="26", help="fut.gg game id (default: 26 = EA FC 26)")
+    p.add_argument("--max-pages", type=int, default=None,
+                   help="cap pages crawled (default: all; ~30 cards/page)")
+    p.add_argument("--delay", type=float, default=0.5,
+                   help="seconds between page fetches (politeness)")
+    p.set_defaults(func=cmd_build_registry)
 
     p = sub.add_parser("build-features", help="compute + persist the features table")
     p.add_argument("--source", default=None, help="price source to use (default: most-populated)")
