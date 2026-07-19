@@ -30,7 +30,7 @@ def _game_of(title: str | None) -> str:
 
 
 def _fetch_with_backoff(def_id: int, game: str, client: httpx.Client, *,
-                        retries: int = 4, base: float = 5.0,
+                        retries: int = 6, base: float = 10.0,
                         sleep=time.sleep) -> list[tuple]:
     """fetch_history, but ride out 429s with exponential backoff + jitter.
     Only a persistent 429 (retries exhausted) or a non-429 error propagates."""
@@ -51,6 +51,7 @@ def backfill_history(conn, *, source: str = BULK_SOURCE,
                      limit: int | None = None, delay: float = 1.0,
                      order: str = "liquidity",
                      max_consecutive_failures: int = 5,
+                     retries: int = 6, backoff_base: float = 10.0,
                      skip_existing: bool = True, min_existing: int = 10,
                      client: httpx.Client | None = None,
                      progress: Callable[[dict], None] | None = None) -> dict:
@@ -82,7 +83,8 @@ def backfill_history(conn, *, source: str = BULK_SOURCE,
                 continue
             try:
                 points = _fetch_with_backoff(
-                    int(def_id), _game_of(card["title"]), client)
+                    int(def_id), _game_of(card["title"]), client,
+                    retries=retries, base=backoff_base)
                 consecutive = 0
             except SourceError as e:
                 res["failed"] += 1

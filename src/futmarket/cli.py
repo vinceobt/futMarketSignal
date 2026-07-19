@@ -298,11 +298,13 @@ def cmd_backfill_history(args) -> None:
         print(f"  ...{res['cards']} cards, {res['inserted']:,} snapshots "
               f"({res['failed']} failed)")
 
-    print(f"backfilling daily history"
-          f"{' (tiers %s)' % ','.join(tiers) if tiers else ' (liquid-first)'}"
-          f"{', limit %d' % args.limit if args.limit else ''}...")
+    scope = f"tiers {','.join(tiers)}" if tiers else (
+        "oldest-first" if args.order == "oldest" else "liquid-first")
+    print(f"backfilling daily history ({scope}"
+          f"{', limit %d' % args.limit if args.limit else ''})...")
     res = backfill.backfill_history(conn, tiers=tiers, limit=args.limit,
-                                    delay=args.delay, order=args.order)
+                                    delay=args.delay, order=args.order,
+                                    max_consecutive_failures=args.max_failures)
     print(f"backfill: {res['cards']} cards, {res['inserted']:,} new snapshots "
           f"from {res['points']:,} points ({res['failed']} failed, {res['skipped']} skipped)")
 
@@ -717,6 +719,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--limit", type=int, default=None, help="cap cards backfilled")
     p.add_argument("--delay", type=float, default=1.0,
                    help="seconds between cards (politeness)")
+    p.add_argument("--max-failures", type=int, default=5,
+                   help="stop after this many consecutive failures (raise it for "
+                        "long bulk runs that may hit extended rate-limit cooldowns)")
     p.add_argument("--order", choices=["liquidity", "oldest"], default="liquidity",
                    help="'oldest' prioritises earliest-released cards (longest "
                         "histories) — use it to de-skew a recency-heavy training set")
