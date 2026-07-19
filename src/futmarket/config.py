@@ -8,7 +8,7 @@ from pathlib import Path
 
 import yaml
 
-VALID_SOURCES = {"mock", "manual", "turnstile_mock"}
+VALID_SOURCES = {"mock", "manual", "turnstile_mock", "futnext"}
 VALID_PLATFORMS = {"console", "pc"}
 MIN_POLL_MINUTES = 30
 

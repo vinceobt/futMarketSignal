@@ -1,4 +1,5 @@
 from .base import PriceQuote, PriceSource, SourceError
+from .futnext_source import FutNextSource
 from .mock import MockSource
 from .turnstile_source import TurnstileMockSource
 
@@ -10,6 +11,8 @@ def get_source(name: str, config) -> PriceSource:
         return MockSource()
     if name == "turnstile_mock":
         return TurnstileMockSource()
+    if name == "futnext":
+        return FutNextSource()
     if name == "manual":
         raise SourceError(
             "source is 'manual': there is nothing to poll. "
