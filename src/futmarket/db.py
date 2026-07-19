@@ -568,6 +568,38 @@ def card_registry(conn: sqlite3.Connection, *, title: str | None = None,
     return conn.execute(sql, tuple(params)).fetchall()
 
 
+def cards_for_backfill(conn: sqlite3.Connection, *, title: str | None = None,
+                       tradeable_only: bool = True,
+                       tiers: tuple[str, ...] | None = None,
+                       limit: int | None = None) -> list[sqlite3.Row]:
+    """Registry cards ordered liquid-first (tier A>B>C>unscored, then score, then
+    rating) — the order the history backfill walks so sellable cards come first."""
+    clauses, params = [], []
+    if title is not None:
+        clauses.append("c.title=?")
+        params.append(title)
+    if tradeable_only:
+        clauses.append("c.tradeable=1")
+    if tiers is not None:
+        clauses.append(f"l.tier IN ({','.join('?' for _ in tiers)})")
+        params.extend(tiers)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    sql = f"""
+        SELECT c.player_id, c.definition_id, c.name, c.title, c.rating,
+               COALESCE(l.tier, 'Z') AS tier, COALESCE(l.score, -1.0) AS score
+        FROM card_meta c
+        LEFT JOIN liquidity l ON l.player_id = c.player_id
+        {where}
+        ORDER BY CASE COALESCE(l.tier, 'Z')
+                   WHEN 'A' THEN 0 WHEN 'B' THEN 1 WHEN 'C' THEN 2 ELSE 3 END,
+                 COALESCE(l.score, -1.0) DESC, c.rating DESC, c.player_id
+    """
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    return conn.execute(sql, tuple(params)).fetchall()
+
+
 def card_count(conn: sqlite3.Connection, *, title: str | None = None,
                tradeable_only: bool = False) -> int:
     clauses, params = [], []

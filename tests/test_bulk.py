@@ -46,7 +46,7 @@ def test_collect_bulk_maps_and_inserts(conn):
     res = bulk_collect.collect_bulk(conn, prices=prices, at=NOW)
     assert res == {"fetched": 3, "matched": 2, "inserted": 2, "unknown": 1}
 
-    hist = futdb.snapshots(conn, "haaland", "futgg_bulk")
+    hist = futdb.snapshots(conn, "haaland", "futgg")
     assert len(hist) == 1 and hist[0]["price"] == 210000
 
 

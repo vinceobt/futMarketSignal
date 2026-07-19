@@ -182,6 +182,27 @@ def cmd_collect_bulk(args) -> None:
           f"({res['unknown']:,} priced ids not in registry)")
 
 
+def cmd_backfill_history(args) -> None:
+    from .services import backfill
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    if db.card_count(conn) == 0:
+        sys.exit("card_meta is empty — run `futmarket build-registry` first")
+    tiers = tuple(t.strip().upper() for t in args.tiers.split(",")) if args.tiers else None
+
+    def progress(res):
+        print(f"  ...{res['cards']} cards, {res['inserted']:,} snapshots "
+              f"({res['failed']} failed)")
+
+    print(f"backfilling daily history"
+          f"{' (tiers %s)' % ','.join(tiers) if tiers else ' (liquid-first)'}"
+          f"{', limit %d' % args.limit if args.limit else ''}...")
+    res = backfill.backfill_history(conn, tiers=tiers, limit=args.limit, delay=args.delay)
+    print(f"backfill: {res['cards']} cards, {res['inserted']:,} new snapshots "
+          f"from {res['points']:,} points ({res['failed']} failed, {res['skipped']} skipped)")
+
+
 def cmd_score_liquidity(args) -> None:
     from .services import liquidity
     config = _load(args)
@@ -559,6 +580,15 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("collect-bulk",
                    help="snapshot the whole market's prices in one pass (fut.gg bulk CDN)"
                    ).set_defaults(func=cmd_collect_bulk)
+
+    p = sub.add_parser("backfill-history",
+                       help="backfill daily price history since release, liquid-first")
+    p.add_argument("--tiers", default=None,
+                   help="comma-separated liquidity tiers to include, e.g. A,B (default: all)")
+    p.add_argument("--limit", type=int, default=None, help="cap cards backfilled")
+    p.add_argument("--delay", type=float, default=1.0,
+                   help="seconds between cards (politeness)")
+    p.set_defaults(func=cmd_backfill_history)
 
     p = sub.add_parser("score-liquidity",
                        help="score card_meta into A/B/C tradeability tiers (rule #1)")

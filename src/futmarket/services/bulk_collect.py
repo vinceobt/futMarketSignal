@@ -16,7 +16,9 @@ from ..collectors import bulk_price_source
 
 logger = logging.getLogger(__name__)
 
-BULK_SOURCE = "futgg_bulk"
+# One canonical fut.gg series per card: daily history (backfill) + spot prices
+# (this collector) share a source so features see a single continuous series.
+BULK_SOURCE = "futgg"
 
 
 def collect_bulk(conn, *, platform: str = "console", source: str = BULK_SOURCE,
