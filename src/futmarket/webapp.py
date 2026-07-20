@@ -86,6 +86,17 @@ def create_app(config_path, source: str | None = None, access_key: str | None = 
                                 f"/static/{asset}?v={_asset_version(asset)}")
         return HTMLResponse(html)
 
+    @app.get("/ml")
+    def ml_dashboard():
+        """Live ML dashboard. Picks/coverage are read fresh on every request;
+        the market rhythms come from the insights cache (see ml/insights.py)."""
+        from .ml import dashboard as ml_dash
+        conn = _conn()
+        try:
+            return HTMLResponse(ml_dash.render(conn, source=source or "futgg"))
+        finally:
+            conn.close()
+
     @app.get("/api/health")
     def health():
         # Public liveness probe — intentionally reveals nothing sensitive.

@@ -51,4 +51,6 @@ run_step "collect-bulk" "$FUT" collect-bulk
 run_step "picks"        "$FUT" picks --limit "$PICKS_LIMIT" \
                                      --min-sales-per-hour "$MIN_SALES" --save
 run_step "scorecard"    "$FUT" scorecard
+# Rhythms sweep millions of rows, so the dashboard reads them from cache.
+run_step "insights"     "$FUT" insights
 echo "[$(stamp)] --- ml cycle done ---" >>"$LOG"

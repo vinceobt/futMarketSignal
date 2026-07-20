@@ -182,6 +182,18 @@ def cmd_collect_bulk(args) -> None:
           f"({res['unknown']:,} priced ids not in registry)")
 
 
+def cmd_insights(args) -> None:
+    from .ml import insights
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    source = _resolve_source(conn, args.source, config)
+    stats = insights.refresh(conn, source=source)
+    print(f"insights refreshed at {stats['computed_at']}: "
+          f"{len(stats['weekly'])} weekday points, {len(stats['hourly'])} hourly cells, "
+          f"{len(stats['release_curve'])} release-curve days")
+
+
 def cmd_scorecard(args) -> None:
     from .services import scorecard
     config = _load(args)
@@ -861,6 +873,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--save", action="store_true",
                    help="record these picks so they can be scored later")
     p.set_defaults(func=cmd_picks)
+
+    p = sub.add_parser("insights",
+                       help="recompute the cached market rhythms the dashboard shows")
+    p.add_argument("--source", default=None)
+    p.set_defaults(func=cmd_insights)
 
     p = sub.add_parser("scorecard",
                        help="score past picks and show the real track record")
