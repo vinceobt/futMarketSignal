@@ -81,3 +81,31 @@ def test_load_from_db(conn):
     lc = lifecycle.load(conn, title="fc26")
     assert lc.days_since_launch("2025-09-18") == 10
     assert lc.days_to_next("2026-01-01", "PROMO") == 9
+
+
+# ---- EA announcements are tracked apart from the card drop ----------------
+
+def test_announcement_is_separate_from_the_card_release(conn):
+    """An EA promo article and the card drop it precedes are different moments:
+    the market dips on the announcement, then recovers days later."""
+    futdb.set_game_launch(conn, title="fc26", launch_date="2025-09-08")
+    futdb.replace_events(conn, source="ea_news", events=[
+        {"event_type": "PROMO", "start_date": "2026-01-08", "end_date": None}])
+    futdb.replace_events(conn, source="derived_cards", events=[
+        {"event_type": "PROMO", "start_date": "2026-01-10", "end_date": None}])
+    conn.commit()
+
+    lc = lifecycle.load(conn, title="fc26")
+    f = lc.features("2026-01-09")
+    assert f["days_since_last_announce"] == 1     # EA spoke yesterday
+    assert f["days_to_next_promo"] == 1           # cards land tomorrow
+    # the announcement must NOT also count as a card-release promo
+    assert lc.days_since_last("2026-01-09", "PROMO") is None
+
+
+def test_non_promo_ea_articles_are_not_announcements(conn):
+    futdb.replace_events(conn, source="ea_news", events=[
+        {"event_type": "PATCH", "start_date": "2026-01-08", "end_date": None}])
+    conn.commit()
+    lc = lifecycle.load(conn, title="fc26")
+    assert lc.days_since_last("2026-01-09", "ANNOUNCE") is None

@@ -16,8 +16,15 @@ from __future__ import annotations
 from bisect import bisect_left, bisect_right
 from datetime import date, datetime
 
-# Event types we build lifecycle distances for.
-TRACKED_TYPES = ("PROMO", "TOTW", "SBC")
+# Event types we build lifecycle distances for. ANNOUNCE is EA's own promo
+# announcement, kept separate from the card drop it precedes: measured across 41
+# announcements, the market drifts up beforehand, falls ~0.5-0.7pp below a normal
+# day on the announcement and the day after, then recovers to ~0.8pp above by day
+# six. Folding that into the card-release PROMO signal would blur two different
+# moments -- the news, and the supply that follows it.
+TRACKED_TYPES = ("PROMO", "TOTW", "SBC", "ANNOUNCE")
+# Events from this source are announcements rather than card releases.
+ANNOUNCEMENT_SOURCE = "ea_news"
 
 
 def _as_date(value) -> date | None:
@@ -110,9 +117,20 @@ def load(conn, *, title: str = "fc26") -> Lifecycle:
     """Build a Lifecycle from the stored calendar for one title."""
     from .. import db
     launch = db.game_launch(conn, title)
-    events = [
-        {"event_type": r["event_type"], "start_date": r["start_date"],
-         "end_date": r["end_date"]}
-        for r in db.events_list(conn, title=title)
-    ]
+    events = []
+    for r in db.events_list(conn, title=title):
+        etype = r["event_type"]
+        # An EA promo article is the announcement; the card drop is tracked
+        # separately by the release-derived PROMO events.
+        if _source_of(r) == ANNOUNCEMENT_SOURCE and etype == "PROMO":
+            etype = "ANNOUNCE"
+        events.append({"event_type": etype, "start_date": r["start_date"],
+                       "end_date": r["end_date"]})
     return Lifecycle(launch_date=launch, events=events)
+
+
+def _source_of(row) -> str | None:
+    try:
+        return row["source"]
+    except (KeyError, IndexError):
+        return None

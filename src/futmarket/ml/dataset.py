@@ -202,6 +202,7 @@ FEATURE_COLUMNS = (
     + ["n_cohorts", "days_since_launch", "days_to_next_promo",
        "days_since_last_promo", "days_to_next_totw", "days_since_last_totw",
        "days_to_next_sbc", "days_since_last_sbc", "active_sbc_count",
+       "days_to_next_announce", "days_since_last_announce",
        "is_weekend_window", "rating", "liq_score", "liq_updates_per_day"]
     # the weekly rhythm and the release curve -- see add_behaviour_features
     + ["day_of_week", "days_since_card_release", "release_phase"]

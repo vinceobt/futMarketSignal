@@ -91,6 +91,12 @@ def _reasons(row: pd.Series) -> list[str]:
         elif age <= 2:
             out.append(f"only {int(age)}d old — release crash still running")
 
+    ann = row.get("days_since_last_announce")
+    if pd.notna(ann) and ann <= 1:
+        out.append(f"EA announced a promo {int(ann)}d ago — the usual dip")
+    elif pd.notna(ann) and 4 <= ann <= 7:
+        out.append(f"{int(ann)}d after an EA announcement — the usual rebound")
+
     promo = row.get("days_to_next_promo")
     if pd.notna(promo) and promo <= 3:
         out.append(f"promo in {int(promo)}d — expect supply")
