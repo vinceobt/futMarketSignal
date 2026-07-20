@@ -1,0 +1,148 @@
+"""Real sale prices — what cards actually change hands for.
+
+Everything upstream of this used the *lowest listing*, which is frequently a
+mispriced snipe that no ordinary buyer can catch. That made our backtests
+quietly optimistic: they assumed you bought at a price that mostly isn't real.
+
+fut.gg's completed-auction feed gives the last ~100 genuine transactions per
+card. From those we take:
+
+  sold_p25 / median / p75   the true going rate, and the band to quote in a
+                            recommendation ("buy 20k-22k" instead of a fake
+                            exact number)
+  sales_per_hour            measured trade activity -- the honest liquidity
+                            signal, replacing our price-change proxy
+  sold_vs_listed            how far the going rate sits above the cheapest
+                            listing, i.e. the realistic entry haircut
+
+Measured on liquid cards: sold_median runs ~1.04x the lowest listing and the
+p25-p75 band spans ~20%, while top cards trade hundreds of times per hour. So
+filling a buy at the going rate is easy; sniping the floor is not required.
+"""
+
+from __future__ import annotations
+
+import logging
+import random
+import time
+from typing import Callable
+
+import httpx
+import numpy as np
+
+from .. import db
+from ..collectors import history_source
+from ..collectors.base import SourceError
+from ..collectors.history_source import RateLimited
+
+logger = logging.getLogger(__name__)
+
+MIN_SALES = 5          # below this the percentiles are noise
+DEFAULT_DELAY = 1.5
+
+
+def summarise_sales(sales: list[tuple], listed: int | None) -> dict | None:
+    """Percentiles, activity rate and listed-price gap from raw completed sales."""
+    if len(sales) < MIN_SALES:
+        return None
+    times = [t for t, _ in sales]
+    prices = np.array([p for _, p in sales], dtype=float)
+    span_hours = max((max(times) - min(times)).total_seconds() / 3600.0, 0.01)
+    p25, median, p75 = (float(x) for x in np.percentile(prices, [25, 50, 75]))
+    return {
+        "n_sales": len(sales),
+        "window_hours": round(span_hours, 3),
+        "sales_per_hour": round(len(sales) / span_hours, 3),
+        "sold_p25": int(round(p25)),
+        "sold_median": int(round(median)),
+        "sold_p75": int(round(p75)),
+        "listed_price": int(listed) if listed else None,
+        "sold_vs_listed": round(median / listed, 4) if listed else None,
+    }
+
+
+def buy_band(stats, *, widen_pct: float = 0.0) -> tuple[int, int] | None:
+    """The price range to actually buy in: the lower half of real sales.
+
+    Quoting a single price is misleading -- the market trades in a band. We take
+    p25..median as the sensible accumulation zone (buying above the median means
+    overpaying versus what others are getting).
+    """
+    if stats is None:
+        return None
+    lo, hi = stats["sold_p25"], stats["sold_median"]
+    if widen_pct:
+        hi = int(round(hi * (1 + widen_pct / 100.0)))
+    return (int(lo), int(hi))
+
+
+def refresh_sale_stats(conn, *, title: str = "fc26", limit: int | None = None,
+                       min_tier: tuple[str, ...] = ("A", "B"),
+                       delay: float = DEFAULT_DELAY, retries: int = 6,
+                       backoff_base: float = 10.0,
+                       max_consecutive_failures: int = 10,
+                       client: httpx.Client | None = None,
+                       progress: Callable[[dict], None] | None = None) -> dict:
+    """Fetch real sale data for tradeable cards and store the going-rate stats."""
+    rows = conn.execute(
+        f"""SELECT m.player_id, m.definition_id, m.title
+            FROM card_meta m LEFT JOIN liquidity l ON l.player_id = m.player_id
+            WHERE m.title = ? AND m.tradeable = 1 AND m.definition_id IS NOT NULL
+              AND COALESCE(l.tier, 'Z') IN ({','.join('?' for _ in min_tier)})
+            ORDER BY COALESCE(l.score, -1) DESC""",
+        (title, *min_tier),
+    ).fetchall()
+    if limit:
+        rows = rows[:limit]
+
+    own = client is None
+    client = client or httpx.Client(timeout=25.0, headers=history_source._HEADERS)
+    res = {"cards": 0, "stored": 0, "thin": 0, "failed": 0}
+    consecutive = 0
+    try:
+        for card in rows:
+            game = (card["title"] or "fc26").replace("fc", "") or "26"
+            detail = None
+            for attempt in range(retries + 1):
+                try:
+                    detail = history_source.fetch_card_detail(
+                        int(card["definition_id"]), game, client=client)
+                    break
+                except RateLimited:
+                    if attempt == retries:
+                        break
+                    wait = backoff_base * (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning("rate-limited; backing off %.0fs", wait)
+                    time.sleep(wait)
+                except SourceError as e:
+                    logger.warning("sales fetch failed for %s: %s", card["player_id"], e)
+                    break
+            res["cards"] += 1
+            if detail is None:
+                res["failed"] += 1
+                consecutive += 1
+                if consecutive >= max_consecutive_failures:
+                    logger.error("circuit breaker: %d consecutive failures", consecutive)
+                    break
+                continue
+            consecutive = 0
+
+            stats = summarise_sales(detail["sales"], detail.get("current"))
+            if stats is None:
+                res["thin"] += 1
+            else:
+                db.upsert_sale_stats(conn, player_id=card["player_id"],
+                                     title=title, **stats)
+                res["stored"] += 1
+            if res["cards"] % 25 == 0:
+                conn.commit()
+                if progress:
+                    progress(res)
+            if delay:
+                time.sleep(delay)
+    finally:
+        if own:
+            client.close()
+    conn.commit()
+    logger.info("sale stats: %s", res)
+    return res

@@ -61,11 +61,18 @@ def _sign(def_id: int, game: str, client: httpx.Client) -> str:
     return signed
 
 
-def fetch_history(def_id: int, game: str = "26", *,
-                  client: httpx.Client | None = None,
-                  timeout: float = 25.0) -> list[tuple[datetime, int]]:
-    """Daily price history since release as (utc_datetime, price), oldest first.
-    Raises SourceError on failure."""
+def fetch_card_detail(def_id: int, game: str = "26", *,
+                      client: httpx.Client | None = None,
+                      timeout: float = 25.0) -> dict:
+    """The card's full price payload: daily history plus real completed sales.
+
+    `completedAuctions` is what the card *actually changed hands for* — far more
+    honest than the lowest listing, which is often a mispriced snipe that never
+    represents the going rate. Returns:
+      history  [(utc_datetime, price)] oldest first
+      sales    [(utc_datetime, sold_price)] most recent ~100 real transactions
+      current  the current lowest listed price (may be None)
+    """
     own = client is None
     client = client or httpx.Client(timeout=timeout, headers=_HEADERS)
     try:
@@ -76,15 +83,33 @@ def fetch_history(def_id: int, game: str = "26", *,
         if resp.status_code != 200:
             raise SourceError(f"history HTTP {resp.status_code} for {def_id}")
         data = resp.json().get("data", {})
-        points: list[tuple[datetime, int]] = []
+
+        history: list[tuple[datetime, int]] = []
         for h in data.get("history", []):
-            price = h.get("price")
-            date = h.get("date")
+            price, date = h.get("price"), h.get("date")
             if price and date:
-                points.append((_parse_ts(date), int(price)))
-        return points
+                history.append((_parse_ts(date), int(price)))
+
+        sales: list[tuple[datetime, int]] = []
+        for a in data.get("completedAuctions", []):
+            price, date = a.get("soldPrice"), a.get("soldDate")
+            if price and date:
+                sales.append((_parse_ts(date), int(price)))
+        sales.sort()
+
+        current = data.get("currentPrice")
+        if isinstance(current, dict):
+            current = current.get("price")
+        return {"history": history, "sales": sales, "current": current}
     except httpx.HTTPError as e:
         raise SourceError(f"history request failed for {def_id}: {e}") from e
     finally:
         if own:
             client.close()
+
+
+def fetch_history(def_id: int, game: str = "26", *,
+                  client: httpx.Client | None = None,
+                  timeout: float = 25.0) -> list[tuple[datetime, int]]:
+    """Daily price history since release as (utc_datetime, price), oldest first."""
+    return fetch_card_detail(def_id, game, client=client, timeout=timeout)["history"]

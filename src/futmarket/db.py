@@ -174,6 +174,27 @@ CREATE TABLE IF NOT EXISTS liquidity (
 );
 CREATE INDEX IF NOT EXISTS idx_liquidity_tier ON liquidity(title, tier);
 
+-- What a card ACTUALLY changed hands for, from fut.gg's completed-auction feed.
+-- The lowest listing is often a mispriced snipe nobody can realistically catch;
+-- these percentiles are the true going rate, and (p25, p75) is the band a buy
+-- recommendation should quote ("buy 20k-22k") instead of a false exact price.
+-- sales_per_hour is measured trade activity -- a far better liquidity signal
+-- than counting how often a listed price changed.
+CREATE TABLE IF NOT EXISTS sale_stats (
+  player_id       TEXT PRIMARY KEY,
+  title           TEXT NOT NULL DEFAULT 'fc26',
+  n_sales         INTEGER NOT NULL,
+  window_hours    REAL,
+  sales_per_hour  REAL,
+  sold_p25        INTEGER,
+  sold_median     INTEGER,
+  sold_p75        INTEGER,
+  listed_price    INTEGER,        -- lowest listing at fetch time, for comparison
+  sold_vs_listed  REAL,           -- sold_median / listed_price
+  computed_at     DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sale_stats_activity ON sale_stats(title, sales_per_hour);
+
 -- Per-title lifecycle anchors (launch date, …). Individual promos/SBCs/TOTW live
 -- in market_events (now title-scoped) — this is just the calendar's "day zero".
 CREATE TABLE IF NOT EXISTS game_calendar (
@@ -706,6 +727,52 @@ def liquidity_by_tier(conn: sqlite3.Connection, tier: str,
     return conn.execute(
         "SELECT * FROM liquidity WHERE tier=? AND title=? ORDER BY score DESC",
         (tier, title)).fetchall()
+
+
+# ---- sale_stats (what cards really sold for) ----
+
+def upsert_sale_stats(conn: sqlite3.Connection, *, player_id: str, n_sales: int,
+                      title: str = "fc26", window_hours: float | None = None,
+                      sales_per_hour: float | None = None,
+                      sold_p25: int | None = None, sold_median: int | None = None,
+                      sold_p75: int | None = None, listed_price: int | None = None,
+                      sold_vs_listed: float | None = None,
+                      at: datetime | None = None) -> None:
+    at = at or datetime.now(timezone.utc)
+    conn.execute(
+        """INSERT INTO sale_stats (player_id, title, n_sales, window_hours,
+              sales_per_hour, sold_p25, sold_median, sold_p75, listed_price,
+              sold_vs_listed, computed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(player_id) DO UPDATE SET
+             title=excluded.title, n_sales=excluded.n_sales,
+             window_hours=excluded.window_hours, sales_per_hour=excluded.sales_per_hour,
+             sold_p25=excluded.sold_p25, sold_median=excluded.sold_median,
+             sold_p75=excluded.sold_p75, listed_price=excluded.listed_price,
+             sold_vs_listed=excluded.sold_vs_listed, computed_at=excluded.computed_at""",
+        (player_id, title, int(n_sales), window_hours, sales_per_hour, sold_p25,
+         sold_median, sold_p75, listed_price, sold_vs_listed, bucket_timestamp(at)),
+    )
+
+
+def sale_stats_get(conn: sqlite3.Connection, player_id: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM sale_stats WHERE player_id=?",
+                        (player_id,)).fetchone()
+
+
+def sale_stats_list(conn: sqlite3.Connection, *, title: str = "fc26",
+                    min_sales_per_hour: float | None = None,
+                    limit: int | None = None) -> list[sqlite3.Row]:
+    clauses, params = ["title=?"], [title]
+    if min_sales_per_hour is not None:
+        clauses.append("sales_per_hour >= ?")
+        params.append(min_sales_per_hour)
+    sql = (f"SELECT * FROM sale_stats WHERE {' AND '.join(clauses)} "
+           "ORDER BY sales_per_hour DESC")
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    return conn.execute(sql, tuple(params)).fetchall()
 
 
 # ---- game_calendar (per-title lifecycle anchor) ----
