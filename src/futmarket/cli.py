@@ -182,6 +182,21 @@ def cmd_collect_bulk(args) -> None:
           f"({res['unknown']:,} priced ids not in registry)")
 
 
+def cmd_x_login(args) -> None:
+    """One-off: log in by hand and save the cookies."""
+    from .collectors import x_source
+    from .collectors.base import SourceError
+    print("Use a BURNER X account — automated reading breaks X's terms, and a")
+    print("suspension should land on a throwaway, not your real account.\n")
+    try:
+        path = x_source.save_session(args.session_file, timeout_s=args.timeout)
+    except SourceError as e:
+        sys.exit(str(e))
+    print(f"\nSaved to {path} (gitignored).")
+    print("Now add the handles to config.yaml under twitter.creators, then run")
+    print("`futmarket social --x` to read them.")
+
+
 def cmd_social(args) -> None:
     from .services import social
     config = _load(args)
@@ -192,16 +207,17 @@ def cmd_social(args) -> None:
         if not rows:
             print("no buzz recorded yet — run `futmarket social`")
             return
-        print(f"{'card':<26}{'mentions':>9}{'lean':>8}")
-        print("-" * 43)
+        print(f"{'player':<26}{'mentions':>9}{'lean':>9}{'cards':>7}  where")
+        print("-" * 62)
         for r in rows:
             lean = r["sentiment"] or 0
-            arrow = "bullish" if lean > 0.15 else "bearish" if lean < -0.15 else "mixed"
-            print(f"{(r['name'] or r['player_id'])[:24]:<26}{r['mentions']:>9}{arrow:>8}")
+            mood = "bullish" if lean > 0.15 else "bearish" if lean < -0.15 else "mixed"
+            print(f"{(r['name'] or '?')[:24]:<26}{r['mentions']:>9}{mood:>9}"
+                  f"{r['cards']:>7}  {r['platforms'] or ''}")
         return
     try:
         res = social.collect(conn, reddit=not args.no_reddit,
-                             youtube=not args.no_youtube)
+                             youtube=not args.no_youtube, x=args.x)
     except Exception as exc:
         sys.exit(str(exc))
     print(f"social: {res['posts']} posts fetched, {res['matched']} mentioned a "
@@ -901,10 +917,19 @@ def main(argv: list[str] | None = None) -> None:
                    help="record these picks so they can be scored later")
     p.set_defaults(func=cmd_picks)
 
+    p = sub.add_parser("x-login",
+                       help="log in to X once (burner account) and save the session")
+    p.add_argument("--session-file", default=".x_session.json")
+    p.add_argument("--timeout", type=int, default=300,
+                   help="seconds to wait for you to finish logging in")
+    p.set_defaults(func=cmd_x_login)
+
     p = sub.add_parser("social",
                        help="collect Reddit/YouTube chatter and match it to cards")
     p.add_argument("--no-reddit", action="store_true")
     p.add_argument("--no-youtube", action="store_true")
+    p.add_argument("--x", action="store_true",
+                   help="also read the X creator list (needs `futmarket x-login`)")
     p.add_argument("--show", type=int, default=None, metavar="N",
                    help="show the N most-talked-about cards instead of collecting")
     p.set_defaults(func=cmd_social)

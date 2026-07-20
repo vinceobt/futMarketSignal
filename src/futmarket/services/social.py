@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 MIN_NAME_LEN = 5
 # A surname shared by more than this many distinct players can't identify anyone.
 MAX_PLAYERS_PER_NAME = 3
+# The leaker/trader accounts worth reading. Leak accounts break promo news early;
+# trading accounts drive hype on specific cards.
+X_CREATORS = ("futSheriff", "FutPoliceLeaks", "Fut_scoreboard", "fifa22_info",
+              "fifa_romania", "EASFCDirect", "futagentt", "AsyFutTrader",
+              "Futdonk", "TradingEi", "FUT_Accountant")
 # Words that look like names but aren't, in this context.
 _STOPWORDS = {
     "team", "week", "season", "squad", "build", "chemistry", "objective",
@@ -93,7 +98,8 @@ def find_mentions(text: str, index: dict[str, list[str]]) -> set[str]:
 
 
 def collect(conn, *, title: str = "fc26", reddit: bool = True,
-            youtube: bool = True, posts=None, now=None) -> dict:
+            youtube: bool = True, x: bool = False, posts=None,
+            now=None, x_handles=None) -> dict:
     """Gather posts, attribute them to cards, and store the day's buzz."""
     now = now or datetime.now(timezone.utc)
     if posts is None:
@@ -108,6 +114,12 @@ def collect(conn, *, title: str = "fc26", reddit: bool = True,
                 posts += social_sources.fetch_youtube()
             except Exception as e:  # noqa: BLE001
                 logger.warning("youtube skipped: %s", e)
+        if x:
+            try:
+                from ..collectors import x_source
+                posts += x_source.fetch_creator_posts(x_handles or X_CREATORS)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("x skipped: %s", e)
 
     index = build_name_index(conn, title=title)
     tally: dict[tuple[str, str], dict] = {}
@@ -137,13 +149,23 @@ def collect(conn, *, title: str = "fc26", reddit: bool = True,
     return res
 
 
-def buzz_table(conn, *, title: str = "fc26", limit: int = 20) -> list:
-    """Who is being talked about most right now."""
+def buzz_table(conn, *, title: str = "fc26", limit: int = 20,
+               days: int = 2) -> list:
+    """Who is being talked about most right now.
+
+    Grouped by player, not card. Hype attaches to a person, and storing it
+    against each of their cards is right for the model but reads as the same name
+    ten times in a row for a human.
+    """
     return conn.execute(
-        """SELECT s.player_id, m.name, m.rating, m.version,
-                  SUM(s.mention_count) AS mentions, AVG(s.sentiment) AS sentiment
+        """SELECT m.name AS name,
+                  MAX(s.mention_count) AS mentions,
+                  AVG(s.sentiment)     AS sentiment,
+                  COUNT(DISTINCT s.player_id) AS cards,
+                  GROUP_CONCAT(DISTINCT s.platform) AS platforms
            FROM sentiment_signals s
-           LEFT JOIN card_meta m ON m.player_id = s.player_id
-           WHERE s.timestamp >= datetime('now', '-2 days')
-           GROUP BY s.player_id ORDER BY mentions DESC, sentiment DESC
-           LIMIT ?""", (limit,)).fetchall()
+           JOIN card_meta m ON m.player_id = s.player_id
+           WHERE s.timestamp >= datetime('now', ?) AND m.name IS NOT NULL
+           GROUP BY m.name
+           ORDER BY mentions DESC, sentiment DESC
+           LIMIT ?""", (f"-{days} days", limit)).fetchall()
