@@ -182,6 +182,83 @@ def cmd_collect_bulk(args) -> None:
           f"({res['unknown']:,} priced ids not in registry)")
 
 
+def cmd_sale_stats(args) -> None:
+    from .services import sales
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    if args.show:
+        rows = db.sale_stats_list(conn, limit=args.show)
+        if not rows:
+            sys.exit("no sale stats yet — run `futmarket sale-stats` first")
+        print(f"{'card':<26}{'buy band':>20}{'median':>10}{'vs listed':>11}{'sales/hr':>10}")
+        print("-" * 77)
+        for r in rows:
+            meta = db.card_meta_get(conn, r["player_id"])
+            name = (meta["name"] if meta else r["player_id"])[:24]
+            band = f"{r['sold_p25']:,}-{r['sold_median']:,}"
+            print(f"{name:<26}{band:>20}{r['sold_median']:>10,}"
+                  f"{r['sold_vs_listed'] or 0:>10.2f}x{r['sales_per_hour']:>10.1f}")
+        return
+
+    def progress(res):
+        print(f"  ...{res['cards']} cards ({res['stored']} stored, {res['failed']} failed)")
+
+    print(f"fetching real completed-sale prices"
+          f"{' (limit %d)' % args.limit if args.limit else ''}...")
+    res = sales.refresh_sale_stats(conn, limit=args.limit, delay=args.delay,
+                                   progress=progress)
+    print(f"sale stats: {res['cards']} cards fetched, {res['stored']} stored, "
+          f"{res['thin']} too few sales, {res['failed']} failed")
+
+
+def cmd_race(args) -> None:
+    from .ml import race as race_mod
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    source = _resolve_source(conn, args.source, config)
+    print(f"racing the model vs the rules engine (same cards, same window, "
+          f"same accounting), source={source!r}...")
+    res = race_mod.race(conn, source=source, horizon=args.horizon,
+                        target_pct=config.strategy_target_pct,
+                        stop_pct=config.strategy_stop_pct,
+                        tax_rate=config.tax_rate, n_splits=args.splits,
+                        max_cards=args.max_cards)
+    if "error" in res:
+        sys.exit(res["error"])
+
+    w = res["window"]
+    print(f"\n{res['cards_raced']} cards, {w['start']} .. {w['end']} "
+          f"(out-of-sample), buy threshold {res['buy_threshold']}\n")
+    header = (f"{'strategy':<14}{'median':>9}{'profitable':>12}{'per trade':>11}"
+              f"{'trades':>8}{'hit':>7}{'max dd':>8}")
+    print(header)
+    print("-" * len(header))
+    for name in ("model", "rules_engine", "buy_and_hold", "random"):
+        s = res["scoreboard"][name]
+        if not s.get("cards"):
+            continue
+        print(f"{name:<14}{s['median_return_pct']:>8.2f}%{s['pct_cards_profitable']:>11.1%}"
+              f"{s['mean_trade_return_pct']:>10.2f}%{s['total_trades']:>8,}"
+              f"{s['hit_rate']:>7.1%}{s['mean_max_drawdown']:>8.1%}")
+    print("\n  (median = the typical card; per trade = average round trip, which "
+          "does not compound.\n   Compounded means are omitted: all-in accounting "
+          "makes them explode and mislead.)")
+
+    h = res.get("head_to_head")
+    if h:
+        print(f"\nhead-to-head on the same {h['cards']} cards:")
+        print(f"  model better on {h['model_wins']}  |  rules engine better on "
+              f"{h['rules_wins']}  |  tied {h['ties']}")
+        print(f"  model win rate: {h['model_win_rate']:.1%}")
+
+    print()
+    for name, won in res["model_beats"].items():
+        print(f"  model vs {name:<14} {'WINS' if won else 'LOSES'} (median)")
+    print(f"\nverdict: model {'BEATS ALL baselines' if res['model_wins_all'] else 'does NOT beat every baseline'}")
+
+
 def cmd_train(args) -> None:
     from .ml import train as train_mod
     config = _load(args)
@@ -686,6 +763,23 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("collect-bulk",
                    help="snapshot the whole market's prices in one pass (fut.gg bulk CDN)"
                    ).set_defaults(func=cmd_collect_bulk)
+
+    p = sub.add_parser("sale-stats",
+                       help="fetch what cards REALLY sold for (true price band + trade rate)")
+    p.add_argument("--limit", type=int, default=None, help="cap cards fetched")
+    p.add_argument("--delay", type=float, default=1.5, help="seconds between cards")
+    p.add_argument("--show", type=int, default=None, metavar="N",
+                   help="just display the top N stored bands instead of fetching")
+    p.set_defaults(func=cmd_sale_stats)
+
+    p = sub.add_parser("race",
+                       help="race the model vs the rules engine on the same cards/window")
+    p.add_argument("--source", default=None)
+    p.add_argument("--horizon", type=int, default=7)
+    p.add_argument("--splits", type=int, default=3)
+    p.add_argument("--max-cards", type=int, default=250,
+                   help="how many cards to race (the rules engine is slow per card)")
+    p.set_defaults(func=cmd_race)
 
     p = sub.add_parser("train",
                        help="train + walk-forward validate the forecast and direction models")
