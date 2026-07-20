@@ -160,7 +160,7 @@ def generate(conn, *, source: str = "futgg", title: str = "fc26",
              tax_rate: float = 0.05, min_confidence: float = MIN_CONFIDENCE,
              limit: int = DEFAULT_LIMIT, min_price: int = MIN_PRICE,
              min_profit_coins: int = MIN_PROFIT_COINS, skip_falling: bool = True,
-             fetch_missing_bands: bool = True,
+             fetch_missing_bands: bool = True, min_sales_per_hour: float = 0.0,
              liquid_tiers: tuple[str, ...] = ("A", "B")) -> list[Pick]:
     """Today's ranked buy candidates, worth actually trading."""
     artifact, run = _load_latest_model(conn, title=title)
@@ -196,10 +196,22 @@ def generate(conn, *, source: str = "futgg", title: str = "fc26",
     latest["confidence"] = artifact["model"].predict_proba(latest[cols])[:, 1]
 
     candidates = latest[latest["confidence"] >= min_confidence]
-    candidates = candidates.sort_values("confidence", ascending=False).head(limit)
+    candidates = candidates.sort_values("confidence", ascending=False).head(limit * 4)
 
     if fetch_missing_bands:
-        _fill_missing_bands(conn, candidates["player_id"].tolist(), title=title)
+        # Fetch a wider shortlist than we'll show, so the sales filter below has
+        # real rates to judge and isn't just dropping cards for missing data.
+        _fill_missing_bands(conn, candidates["player_id"].tolist()[:limit * 3],
+                            title=title)
+
+    if min_sales_per_hour > 0:
+        # Rule #1 in its truest form: confidence is worthless if you can't get out.
+        keep = []
+        for pid in candidates["player_id"]:
+            stats = db.sale_stats_get(conn, pid)
+            keep.append(stats is not None and (stats["sales_per_hour"] or 0)
+                        >= min_sales_per_hour)
+        candidates = candidates[pd.Series(keep, index=candidates.index)]
 
     target_mult = (1.0 + target_pct / 100.0) / (1.0 - tax_rate)
     picks: list[Pick] = []

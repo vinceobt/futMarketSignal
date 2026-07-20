@@ -47,9 +47,11 @@ def test_untradeable_is_zero_c():
     assert liquidity.score_card(tradeable=False, activity=99.0, price=50000) == (0.0, "C", False)
 
 
-def test_measured_active_card_is_tier_a():
+def test_busy_listing_scores_well_but_caps_at_b():
+    """A busy *listed* price earns a good score, but tier A now requires evidence
+    of real completed sales -- see test_proxy_alone_can_never_reach_tier_a."""
     score, tier, measured = liquidity.score_card(tradeable=True, activity=8.0, price=30000)
-    assert measured and tier == "A" and score >= liquidity.TIER_A_MIN
+    assert measured and tier == "B" and score >= liquidity.TIER_B_MIN
 
 
 def test_measured_inactive_card_is_low():
@@ -94,3 +96,56 @@ def test_refresh_liquidity_writes_tiers(conn):
     assert active["score"] > cold["score"]              # activity beats provisional
     assert cold["updates_per_day"] is None              # provisional
     assert sbc["tier"] == "C" and sbc["score"] == 0.0   # untradeable
+
+
+# ---- real sale rates outrank the price-change proxy -----------------------
+
+def test_real_sale_rate_sets_the_tier():
+    """Tiers come from how fast a card actually sells, not a listing proxy."""
+    fast, tier_fast, measured = liquidity.score_card(
+        tradeable=True, sales_per_hour=300.0, price=20_000)
+    assert tier_fast == "A" and measured and fast > 8
+
+    _, tier_mid, _ = liquidity.score_card(
+        tradeable=True, sales_per_hour=5.0, price=20_000)
+    assert tier_mid == "B"
+
+    _, tier_thin, _ = liquidity.score_card(
+        tradeable=True, sales_per_hour=0.5, price=20_000)
+    assert tier_thin == "C"
+
+
+def test_proxy_alone_can_never_reach_tier_a():
+    """A moving listed price is not proof anything traded."""
+    score, tier, measured = liquidity.score_card(
+        tradeable=True, activity=999.0, price=20_000)
+    assert measured and tier != "A" and score < liquidity.TIER_A_MIN
+
+
+def test_real_sales_beat_the_proxy_when_both_present():
+    # proxy says busy, real sales say thin -> thin wins
+    _, tier, _ = liquidity.score_card(
+        tradeable=True, activity=999.0, sales_per_hour=0.2, price=20_000)
+    assert tier == "C"
+
+
+def test_sales_activity_is_log_scaled():
+    n1 = liquidity.sales_activity_norm(1)
+    n10 = liquidity.sales_activity_norm(10)
+    n1000 = liquidity.sales_activity_norm(1000)
+    assert n1 < n10 < 1.0 and n1000 == 1.0     # saturates, doesn't run away
+    assert (n10 - n1) > (n1000 - n10)          # early gains matter most
+
+
+def test_refresh_prefers_real_sales(conn):
+    futdb.upsert_card_meta(conn, {"player_id": "fast", "tradeable": 1})
+    futdb.upsert_card_meta(conn, {"player_id": "slow", "tradeable": 1})
+    futdb.upsert_sale_stats(conn, player_id="fast", n_sales=100,
+                            sales_per_hour=250.0, sold_median=20_000)
+    futdb.upsert_sale_stats(conn, player_id="slow", n_sales=100,
+                            sales_per_hour=0.3, sold_median=20_000)
+    conn.commit()
+    res = liquidity.refresh_liquidity(conn, now=NOW)
+    assert res["from_real_sales"] == 2
+    assert futdb.liquidity_get(conn, "fast")["tier"] == "A"
+    assert futdb.liquidity_get(conn, "slow")["tier"] == "C"

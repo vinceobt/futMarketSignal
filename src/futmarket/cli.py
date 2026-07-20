@@ -193,7 +193,7 @@ def cmd_picks(args) -> None:
             conn, source=source, target_pct=config.strategy_target_pct,
             stop_pct=config.strategy_stop_pct, tax_rate=config.tax_rate,
             min_confidence=args.min_confidence, limit=args.limit,
-            min_price=args.min_price)
+            min_price=args.min_price, min_sales_per_hour=args.min_sales_per_hour)
     except RuntimeError as e:
         sys.exit(str(e))
 
@@ -814,6 +814,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--min-price", type=int, default=5000,
                    help="ignore near-discard cards (their %% moves are noise "
                         "and the coins aren't worth trading)")
+    p.add_argument("--min-sales-per-hour", type=float, default=0.0,
+                   help="only cards that genuinely sell this often -- confidence "
+                        "is worthless if you cannot get out")
     p.add_argument("--save", action="store_true",
                    help="record these picks so they can be scored later")
     p.set_defaults(func=cmd_picks)
