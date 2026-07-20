@@ -269,7 +269,10 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     # WAL lets the web process read while the worker thread writes.
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    # Long jobs (a training run, a bulk fetch) legitimately hold the write lock
+    # for a while. 5s was short enough that an 11-minute training run could do all
+    # its work and then fail on the final one-row insert, losing everything.
+    conn.execute("PRAGMA busy_timeout=60000")
     conn.executescript(SCHEMA)
     _migrate(conn)
     return conn

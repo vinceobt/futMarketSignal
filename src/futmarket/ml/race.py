@@ -33,6 +33,46 @@ logger = logging.getLogger(__name__)
 BUY_PERCENTILE = 90        # buy when the model is in the top decile of confidence
 MIN_WINDOW_ROWS = 30       # a card needs this many test-window days to be raceable
 
+# Realistic execution costs, measured from fut.gg's completed-auction feed:
+# on liquid cards the going rate sits ~1.04x the cheapest listing, so a buyer who
+# isn't sniping the floor pays about 4% more than the recorded price. Selling
+# quickly means undercutting the book, so assume a smaller give-back on exit.
+# (Applied to EVERY strategy -- friction must not be charged to one contender.)
+BUY_HAIRCUT_PCT = 4.0
+SELL_HAIRCUT_PCT = 2.0
+
+
+def apply_execution_costs(result: BacktestResult, *, buy_haircut_pct: float,
+                          sell_haircut_pct: float, tax_rate: float) -> BacktestResult:
+    """Re-price a completed backtest at realistic fills.
+
+    Recomputes every round trip as if bought above the recorded price and sold
+    below it, then recompounds. Drawdown is left as measured -- it reflects the
+    price path, which fills don't change.
+    """
+    if not result.trades:
+        return result
+    buy_mult = 1.0 + buy_haircut_pct / 100.0
+    sell_mult = (1.0 - sell_haircut_pct / 100.0) * (1.0 - tax_rate)
+
+    adjusted: list[Trade] = []
+    equity = 1.0
+    for t in result.trades:
+        if t.buy_price <= 0:
+            continue
+        ret = (t.sell_price * sell_mult) / (t.buy_price * buy_mult) - 1.0
+        equity *= (1.0 + ret)
+        adjusted.append(Trade(t.buy_ts, t.buy_price, t.sell_ts, t.sell_price, ret))
+
+    n = len(adjusted)
+    wins = sum(1 for t in adjusted if t.ret > 0)
+    return BacktestResult(
+        label=result.label, n_trades=n,
+        hit_rate=(wins / n) if n else 0.0,
+        avg_trade_return=(sum(t.ret for t in adjusted) / n) if n else 0.0,
+        total_return=equity - 1.0, max_drawdown=result.max_drawdown,
+        ending_equity=equity, trades=adjusted)
+
 
 def run_model_backtest(rows: pd.DataFrame, *, threshold: float,
                        target_pct: float, stop_pct: float, tax_rate: float,
@@ -117,6 +157,8 @@ def out_of_sample_probabilities(frame: pd.DataFrame, *, horizon: int,
 def race(conn, *, source: str = "futgg", title: str = "fc26", horizon: int = 7,
          target_pct: float = 25.0, stop_pct: float = 8.0, tax_rate: float = 0.05,
          n_splits: int = 3, max_cards: int = 250,
+         buy_haircut_pct: float = BUY_HAIRCUT_PCT,
+         sell_haircut_pct: float = SELL_HAIRCUT_PCT,
          params: StrategyParams | None = None) -> dict:
     """Run every strategy over the same cards and window; return the scoreboard."""
     frame = dataset.build_dataset(conn, source=source, title=title)
@@ -152,9 +194,11 @@ def race(conn, *, source: str = "futgg", title: str = "fc26", horizon: int = 7,
             continue
         window_start, window_end = rows["date"].iloc[0], rows["date"].iloc[-1]
 
-        model_result = run_model_backtest(
+        costs = dict(buy_haircut_pct=buy_haircut_pct,
+                     sell_haircut_pct=sell_haircut_pct, tax_rate=tax_rate)
+        model_result = apply_execution_costs(run_model_backtest(
             rows, threshold=threshold, target_pct=target_pct,
-            stop_pct=stop_pct, tax_rate=tax_rate)
+            stop_pct=stop_pct, tax_rate=tax_rate), **costs)
         tally["model"].append(model_result)
 
         # The rules engine gets its full lookback but only trades the same window.
@@ -164,11 +208,18 @@ def race(conn, *, source: str = "futgg", title: str = "fc26", horizon: int = 7,
         feats = [f for f in compute_feature_table(conn, player_id, source)
                  if window_start <= f.timestamp[:10] <= window_end]
         if len(feats) >= 2:
-            rules_result = run_rebound_backtest(feats, series, params,
-                                                label="rules_engine")
+            rules_result = apply_execution_costs(
+                run_rebound_backtest(feats, series, params, label="rules_engine"),
+                **costs)
             tally["rules_engine"].append(rules_result)
-            tally["buy_and_hold"].append(buy_and_hold(feats, tax_rate))
-            tally["random"].append(random_baseline(feats, tax_rate, n_runs=20))
+            tally["buy_and_hold"].append(
+                apply_execution_costs(buy_and_hold(feats, tax_rate), **costs))
+            # random_baseline reports an average across runs and carries no trade
+            # list, so costs can't be applied to it. That flatters random, which
+            # only makes the bar for the model harder -- a conservative bias.
+            tally["random"].append(
+                apply_execution_costs(random_baseline(feats, tax_rate, n_runs=20),
+                                      **costs))
             paired.append((model_result.total_return, rules_result.total_return))
         raced += 1
 

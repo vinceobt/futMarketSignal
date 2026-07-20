@@ -69,6 +69,35 @@ def test_nan_probability_never_buys():
     assert res.n_trades == 0
 
 
+def test_execution_costs_reduce_every_trade():
+    """Realistic fills (pay more, receive less) must eat into returns."""
+    raw = race.run_model_backtest(_rows([100, 140], [0.9, 0.1]), **KW)
+    adjusted = race.apply_execution_costs(raw, buy_haircut_pct=4.0,
+                                          sell_haircut_pct=2.0, tax_rate=0.05)
+    assert adjusted.n_trades == raw.n_trades
+    assert adjusted.trades[0].ret < raw.trades[0].ret
+    # bought at 104, sold at 140*0.98 net of 5% tax
+    expected = (140 * 0.98 * 0.95) / (100 * 1.04) - 1
+    assert round(adjusted.trades[0].ret, 6) == round(expected, 6)
+
+
+def test_execution_costs_can_flip_a_marginal_winner():
+    """A trade that barely cleared tax should turn negative under real fills."""
+    raw = race.run_model_backtest(_rows([100, 132], [0.9, 0.1]), **KW)
+    assert raw.trades[0].ret > 0
+    adjusted = race.apply_execution_costs(raw, buy_haircut_pct=8.0,
+                                          sell_haircut_pct=8.0, tax_rate=0.05)
+    assert adjusted.trades[0].ret < raw.trades[0].ret
+
+
+def test_execution_costs_noop_without_trades():
+    raw = race.run_model_backtest(_rows([100, 110], [0.1, 0.1]), **KW)
+    assert raw.n_trades == 0
+    same = race.apply_execution_costs(raw, buy_haircut_pct=4.0,
+                                      sell_haircut_pct=2.0, tax_rate=0.05)
+    assert same is raw
+
+
 def test_equity_matches_cash_after_a_closed_trade():
     res = race.run_model_backtest(_rows([100, 140, 141], [0.9, 0.1, 0.1]), **KW)
     assert res.n_trades == 1

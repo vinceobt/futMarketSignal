@@ -92,10 +92,41 @@ def add_card_features(daily: pd.DataFrame) -> pd.DataFrame:
 
 def _attributes(conn, title: str) -> pd.DataFrame:
     rows = conn.execute(
-        """SELECT player_id, name, rating, position, league, nation, version
+        """SELECT player_id, name, rating, position, league, nation, version,
+                  release_date
            FROM card_meta WHERE title = ?""", (title,)).fetchall()
     return pd.DataFrame(rows, columns=["player_id", "name", "rating", "position",
-                                       "league", "nation", "version"])
+                                       "league", "nation", "version", "release_date"])
+
+
+def add_behaviour_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """The rhythms a human trader actually watches.
+
+    Two patterns dominate this market and neither is visible from price alone:
+
+    * The weekly cycle. Promos drop on Friday; Saturday is reliably the worst day
+      (-1.86% average) and Monday the best (+1.31%) -- a ~3% swing every week.
+    * The release curve. A new promo card crashes ~33% over its first four days,
+      bottoms around day nine, then recovers ~12%. Where a card sits on that curve
+      matters far more than its absolute price.
+
+    So we tell the model what day of the week it is and how old the card is.
+    """
+    out = frame.copy()
+    dates = pd.to_datetime(out["date"], format="%Y-%m-%d", errors="coerce")
+    out["day_of_week"] = dates.dt.dayofweek                    # 0 = Monday
+    out["is_weekend_window"] = dates.dt.dayofweek.isin((3, 4, 5, 6)).astype(int)
+
+    if "release_date" in out.columns:
+        released = pd.to_datetime(out["release_date"], format="%Y-%m-%d",
+                                  errors="coerce")
+        out["days_since_card_release"] = (dates - released).dt.days
+        # The crash-and-recover phase: fresh drop, the slide, the bottom, recovery.
+        out["release_phase"] = pd.cut(
+            out["days_since_card_release"],
+            bins=[-np.inf, 0, 2, 5, 11, 21, np.inf],
+            labels=[0, 1, 2, 3, 4, 5]).astype("float")
+    return out
 
 
 def _liquidity(conn, title: str) -> pd.DataFrame:
@@ -133,6 +164,7 @@ def build_dataset(conn, *, source: str = "futgg", title: str = "fc26",
 
     frame = add_card_features(daily)
     frame = frame.merge(_attributes(conn, title), on="player_id", how="left")
+    frame = add_behaviour_features(frame)
 
     exploded = _explode_cohorts(frame)
     indices = cohorts.build_indices(
@@ -160,4 +192,6 @@ FEATURE_COLUMNS = (
        "days_since_last_promo", "days_to_next_totw", "days_since_last_totw",
        "days_to_next_sbc", "days_since_last_sbc", "active_sbc_count",
        "is_weekend_window", "rating", "liq_score", "liq_updates_per_day"]
+    # the weekly rhythm and the release curve -- see add_behaviour_features
+    + ["day_of_week", "days_since_card_release", "release_phase"]
 )

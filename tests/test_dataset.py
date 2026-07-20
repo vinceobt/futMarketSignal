@@ -130,3 +130,36 @@ def test_relative_strength_signs(conn):
     frame = dataset.build_dataset(conn)
     riser = frame[(frame["player_id"] == "riser") & (frame["date"] == "2026-02-05")]
     assert riser["rel_strength_1d"].iloc[0] > 0
+
+
+# ---- behaviour features (weekly rhythm + release curve) -------------------
+
+def test_day_of_week_and_weekend_flag():
+    frame = pd.DataFrame({"player_id": ["p"] * 3,
+                          "date": ["2026-07-17", "2026-07-18", "2026-07-20"],
+                          "price": [100, 100, 100]})
+    out = dataset.add_behaviour_features(frame)
+    # 2026-07-17 is a Friday, 18th Saturday, 20th Monday
+    assert list(out["day_of_week"]) == [4, 5, 0]
+    assert list(out["is_weekend_window"]) == [1, 1, 0]
+
+
+def test_days_since_card_release_and_phase():
+    frame = pd.DataFrame({
+        "player_id": ["p"] * 4,
+        "date": ["2026-07-01", "2026-07-02", "2026-07-10", "2026-08-01"],
+        "price": [100] * 4,
+        "release_date": ["2026-07-01"] * 4})
+    out = dataset.add_behaviour_features(frame)
+    assert list(out["days_since_card_release"]) == [0, 1, 9, 31]
+    # phase rises as the card ages through crash -> bottom -> recovery
+    phases = list(out["release_phase"])
+    assert phases == sorted(phases) and phases[0] < phases[-1]
+
+
+def test_behaviour_features_survive_missing_release_date():
+    frame = pd.DataFrame({"player_id": ["p"], "date": ["2026-07-17"],
+                          "price": [100], "release_date": [None]})
+    out = dataset.add_behaviour_features(frame)
+    assert out["day_of_week"].iloc[0] == 4
+    assert pd.isna(out["days_since_card_release"].iloc[0])

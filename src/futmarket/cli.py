@@ -182,6 +182,46 @@ def cmd_collect_bulk(args) -> None:
           f"({res['unknown']:,} priced ids not in registry)")
 
 
+def cmd_picks(args) -> None:
+    from .ml import picks as picks_mod
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    source = _resolve_source(conn, args.source, config)
+    try:
+        found = picks_mod.generate(
+            conn, source=source, target_pct=config.strategy_target_pct,
+            stop_pct=config.strategy_stop_pct, tax_rate=config.tax_rate,
+            min_confidence=args.min_confidence, limit=args.limit,
+            min_price=args.min_price)
+    except RuntimeError as e:
+        sys.exit(str(e))
+
+    if not found:
+        print("no cards clear the confidence bar today — sit out")
+        return
+
+    print(f"\n{len(found)} candidate(s), most confident first\n")
+    for i, p in enumerate(found, 1):
+        band = (f"{p.buy_low:,}-{p.buy_high:,}" if p.buy_low
+                else f"~{p.price_now:,} (no sale data yet)")
+        rating = f"{p.rating}" if p.rating else "--"
+        print(f"{i:>2}. {p.name}  ({rating} {p.version[:28]})")
+        print(f"    BUY   {band}          confidence {p.confidence:.0%}")
+        print(f"    SELL  ~{p.sell_target:,}      stop {p.stop:,}")
+        liq = f"tier {p.liquidity_tier}" if p.liquidity_tier else "?"
+        if p.sales_per_hour:
+            liq += f", {p.sales_per_hour:.0f} sales/hr"
+        print(f"    {liq}")
+        for r in p.reasons:
+            print(f"      - {r}")
+        print()
+
+    if args.save:
+        n = picks_mod.save(conn, found)
+        print(f"recorded {n} picks for later scoring")
+
+
 def cmd_sale_stats(args) -> None:
     from .services import sales
     config = _load(args)
@@ -224,7 +264,9 @@ def cmd_race(args) -> None:
                         target_pct=config.strategy_target_pct,
                         stop_pct=config.strategy_stop_pct,
                         tax_rate=config.tax_rate, n_splits=args.splits,
-                        max_cards=args.max_cards)
+                        max_cards=args.max_cards,
+                        buy_haircut_pct=args.buy_haircut,
+                        sell_haircut_pct=args.sell_haircut)
     if "error" in res:
         sys.exit(res["error"])
 
@@ -764,6 +806,18 @@ def main(argv: list[str] | None = None) -> None:
                    help="snapshot the whole market's prices in one pass (fut.gg bulk CDN)"
                    ).set_defaults(func=cmd_collect_bulk)
 
+    p = sub.add_parser("picks", help="what to buy right now, at what price, and why")
+    p.add_argument("--source", default=None)
+    p.add_argument("--limit", type=int, default=20, help="how many candidates to show")
+    p.add_argument("--min-confidence", type=float, default=0.30,
+                   help="ignore cards the model is less sure about than this")
+    p.add_argument("--min-price", type=int, default=5000,
+                   help="ignore near-discard cards (their %% moves are noise "
+                        "and the coins aren't worth trading)")
+    p.add_argument("--save", action="store_true",
+                   help="record these picks so they can be scored later")
+    p.set_defaults(func=cmd_picks)
+
     p = sub.add_parser("sale-stats",
                        help="fetch what cards REALLY sold for (true price band + trade rate)")
     p.add_argument("--limit", type=int, default=None, help="cap cards fetched")
@@ -779,6 +833,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--splits", type=int, default=3)
     p.add_argument("--max-cards", type=int, default=250,
                    help="how many cards to race (the rules engine is slow per card)")
+    p.add_argument("--buy-haircut", type=float, default=4.0,
+                   help="%% above the recorded price you realistically pay "
+                        "(measured: the going rate is ~1.04x the cheapest listing)")
+    p.add_argument("--sell-haircut", type=float, default=2.0,
+                   help="%% below the recorded price you realistically receive")
     p.set_defaults(func=cmd_race)
 
     p = sub.add_parser("train",

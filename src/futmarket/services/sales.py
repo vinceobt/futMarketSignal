@@ -134,10 +134,11 @@ def refresh_sale_stats(conn, *, title: str = "fc26", limit: int | None = None,
                 db.upsert_sale_stats(conn, player_id=card["player_id"],
                                      title=title, **stats)
                 res["stored"] += 1
-            if res["cards"] % 25 == 0:
-                conn.commit()
-                if progress:
-                    progress(res)
+            # Commit per card, not per batch: batching held the write lock for
+            # ~40s at a time, long enough to lock out a concurrent training run.
+            conn.commit()
+            if res["cards"] % 25 == 0 and progress:
+                progress(res)
             if delay:
                 time.sleep(delay)
     finally:
