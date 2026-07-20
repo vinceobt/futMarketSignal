@@ -107,22 +107,34 @@ def _reasons(row: pd.Series) -> list[str]:
 
 
 def _fill_missing_bands(conn, player_ids: list[str], *, title: str = "fc26",
-                        delay: float = 1.0) -> int:
-    """Fetch real sale data for shortlisted cards that don't have it yet.
+                        delay: float = 1.0, max_age_minutes: float = 60.0) -> int:
+    """Fetch real sale data for shortlisted cards that lack it OR have gone stale.
 
-    A pick without a price band is half a recommendation -- it can only quote the
-    lowest listing, which is the very number we decided not to trust. The
-    shortlist is short, so fetching on demand is cheap.
+    A pick without a band can only quote the lowest listing -- the very number we
+    decided not to trust. A pick with a *stale* band is worse: it quotes a
+    confident price that has since moved. Prices here can run 30%+ in a few
+    hours, so anything older than an hour is refetched. The shortlist is short,
+    so doing it on demand is cheap.
     """
     import time
+    from datetime import datetime, timezone
     from ..collectors import history_source
     from ..collectors.base import SourceError
     from ..services import sales as sales_service
 
+    now = datetime.now(timezone.utc)
     fetched = 0
     for pid in player_ids:
-        if db.sale_stats_get(conn, pid) is not None:
-            continue
+        existing = db.sale_stats_get(conn, pid)
+        if existing is not None:
+            try:
+                age_min = (now - datetime.strptime(
+                    existing["computed_at"], "%Y-%m-%dT%H:%M:%SZ"
+                ).replace(tzinfo=timezone.utc)).total_seconds() / 60.0
+            except (TypeError, ValueError):
+                age_min = float("inf")
+            if age_min <= max_age_minutes:
+                continue
         meta = db.card_meta_get(conn, pid)
         if meta is None or meta["definition_id"] is None:
             continue
