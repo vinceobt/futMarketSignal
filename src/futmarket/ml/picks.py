@@ -51,6 +51,7 @@ class Pick:
     stop: int
     liquidity_tier: str | None
     sales_per_hour: float | None
+    url: str | None = None          # exact card -- names repeat across versions
     reasons: list[str] = field(default_factory=list)
 
 
@@ -231,10 +232,14 @@ def generate(conn, *, source: str = "futgg", title: str = "fc26",
         r = pd.Series(row._asdict())
         price = int(r["price"])
         stats = db.sale_stats_get(conn, r["player_id"])
-        band = None
-        if stats is not None:
-            band = sales_service.buy_band({
-                "sold_p25": stats["sold_p25"], "sold_median": stats["sold_median"]})
+        meta = db.card_meta_get(conn, r["player_id"])
+        # The listed price refreshed moments ago is the only figure that is
+        # genuinely current; sales lag it on anything that's moving.
+        listed = stats["listed_price"] if stats is not None else None
+        band = sales_service.buy_band(
+            {"listed_price": listed, "sold_median": stats["sold_median"]}
+            if stats is not None else None,
+            listed_price=listed or price)
         # Target and stop must be anchored to the price you would actually PAY.
         # Deriving them from the current listing while quoting a band from
         # completed sales put them on different scales -- it produced sell targets
@@ -254,6 +259,7 @@ def generate(conn, *, source: str = "futgg", title: str = "fc26",
             liquidity_tier=r.get("liq_tier"),
             sales_per_hour=(float(stats["sales_per_hour"])
                             if stats is not None and stats["sales_per_hour"] else None),
+            url=(meta["url"] if meta is not None else None),
             reasons=_reasons(r),
         ))
     logger.info("generated %d picks from run %s", len(picks),

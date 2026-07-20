@@ -41,11 +41,21 @@ def test_summarise_handles_missing_listed():
     assert stats["listed_price"] is None and stats["sold_vs_listed"] is None
 
 
-def test_buy_band_is_lower_half_of_real_sales():
-    stats = sales.summarise_sales(_sales([10, 12, 14, 16, 18, 20, 22, 24, 26]), listed=15)
-    lo, hi = sales.buy_band(stats)
-    assert (lo, hi) == (14, 18)          # p25 .. median, not a fake exact price
+def test_buy_band_anchors_to_the_live_listing():
+    """Real failure this guards: a band built from completed sales quoted
+    173k-195k while the card was actually listed at 241k. Sales lag; the
+    listing is current, so the band must start there."""
+    stats = sales.summarise_sales(_sales([10, 12, 14, 16, 18, 20, 22, 24, 26]), listed=100)
+    lo, hi = sales.buy_band(stats, listed_price=100)
+    assert lo == 100                      # start at the live price
+    assert hi == 105                      # pay a little over it to get filled
     assert lo < hi
+
+
+def test_buy_band_ignores_stale_sales_when_listing_moved():
+    stats = sales.summarise_sales(_sales([50_000] * 9), listed=241_000)
+    lo, hi = sales.buy_band(stats, listed_price=241_000)
+    assert lo == 241_000 and hi > lo      # not the 50k the old sales suggest
 
 
 def test_buy_band_widen():

@@ -215,6 +215,8 @@ def cmd_picks(args) -> None:
         print(f"    {liq}")
         for r in p.reasons:
             print(f"      - {r}")
+        if p.url:
+            print(f"    {p.url}")
         print()
 
     if args.save:

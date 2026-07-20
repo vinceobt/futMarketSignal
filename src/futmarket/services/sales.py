@@ -86,19 +86,30 @@ def summarise_sales(sales: list[tuple], listed: int | None) -> dict | None:
     }
 
 
-def buy_band(stats, *, widen_pct: float = 0.0) -> tuple[int, int] | None:
-    """The price range to actually buy in: the lower half of real sales.
+# You pay slightly over the cheapest listing to actually get filled -- measured at
+# ~1.04x on liquid cards. This is the realistic window above the live price.
+BUY_OVER_LISTED_PCT = 5.0
 
-    Quoting a single price is misleading -- the market trades in a band. We take
-    p25..median as the sensible accumulation zone (buying above the median means
-    overpaying versus what others are getting).
+
+def buy_band(stats, *, listed_price: int | None = None,
+             widen_pct: float = BUY_OVER_LISTED_PCT) -> tuple[int, int] | None:
+    """The price range to actually buy in.
+
+    Anchored to the LIVE listed price, not to completed sales. Sales describe
+    what the card traded for over the past several hours, which on a moving card
+    lags badly: a real case quoted 173k-195k while the card was listed at 241k.
+    The listing is always current, so it is the honest anchor, and you pay a
+    little over it to get filled.
+
+    Completed sales remain the right source for *liquidity* (sales per hour) --
+    they are simply the wrong source for "what will this cost me right now".
     """
-    if stats is None:
+    anchor = listed_price
+    if anchor is None and stats is not None:
+        anchor = stats.get("listed_price") or stats.get("sold_median")
+    if not anchor or anchor <= 0:
         return None
-    lo, hi = stats["sold_p25"], stats["sold_median"]
-    if widen_pct:
-        hi = int(round(hi * (1 + widen_pct / 100.0)))
-    return (int(lo), int(hi))
+    return (int(anchor), int(round(anchor * (1 + widen_pct / 100.0))))
 
 
 def refresh_sale_stats(conn, *, title: str = "fc26", limit: int | None = None,
