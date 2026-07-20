@@ -77,3 +77,35 @@ def test_sale_stats_upsert_replaces(conn):
     conn.commit()
     got = futdb.sale_stats_get(conn, "p1")
     assert got["n_sales"] == 9 and got["sold_median"] == 200
+
+
+# ---- the band must reflect prices you can trade at NOW --------------------
+
+def test_band_tracks_a_rising_price_not_the_stale_average():
+    """Real failure this guards: 100 sales over 15h on a rising card gave a
+    53,500 band while the card actually traded at 74,500."""
+    old = [(T0 + timedelta(minutes=i * 6), 50_000) for i in range(80)]     # ~8h cheap
+    new = [(T0 + timedelta(hours=8, minutes=i * 6), 72_000) for i in range(20)]
+    stats = sales.summarise_sales(old + new, listed=74_000)
+    # the band follows the recent sales, not the 15-hour average
+    assert stats["sold_median"] == 72_000
+    assert stats["band_from_sales"] <= 25
+    # and the rate still uses the whole window
+    assert stats["n_sales"] == 100
+    assert stats["window_hours"] > 8
+
+
+def test_band_falls_back_to_last_sales_when_window_is_quiet():
+    """A thin card with no sales in the recent window still gets a usable band."""
+    spaced = [(T0 + timedelta(hours=i * 3), 10_000 + i * 100) for i in range(12)]
+    stats = sales.summarise_sales(spaced, listed=11_000)
+    assert stats is not None
+    assert stats["band_from_sales"] >= sales.MIN_SALES
+
+
+def test_recent_slice_prefers_the_time_window():
+    dense = [(T0 + timedelta(minutes=i * 5), 100) for i in range(40)]
+    recent = sales._recent_slice(dense)
+    newest = max(t for t, _ in dense)
+    assert all((newest - t).total_seconds() / 3600 <= sales.RECENT_HOURS
+               for t, _ in recent)

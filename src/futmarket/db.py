@@ -185,6 +185,8 @@ CREATE TABLE IF NOT EXISTS sale_stats (
   title           TEXT NOT NULL DEFAULT 'fc26',
   n_sales         INTEGER NOT NULL,
   window_hours    REAL,
+  band_from_sales INTEGER,       -- how many recent sales the band came from
+  band_window_hours REAL,        -- how recent those sales are
   sales_per_hour  REAL,
   sold_p25        INTEGER,
   sold_median     INTEGER,
@@ -256,6 +258,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 f"ALTER TABLE {table} ADD COLUMN title TEXT NOT NULL DEFAULT 'fc26'")
     # Where an event came from, so *derived* calendar rows can be rebuilt without
     # touching events a human logged via `futmarket log-event`.
+    for col, decl in (("band_from_sales", "INTEGER"), ("band_window_hours", "REAL")):
+        if col not in _column_names(conn, "sale_stats"):
+            conn.execute(f"ALTER TABLE sale_stats ADD COLUMN {col} {decl}")
     if "source" not in _column_names(conn, "market_events"):
         conn.execute(
             "ALTER TABLE market_events ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
@@ -736,6 +741,8 @@ def liquidity_by_tier(conn: sqlite3.Connection, tier: str,
 
 def upsert_sale_stats(conn: sqlite3.Connection, *, player_id: str, n_sales: int,
                       title: str = "fc26", window_hours: float | None = None,
+                      band_from_sales: int | None = None,
+                      band_window_hours: float | None = None,
                       sales_per_hour: float | None = None,
                       sold_p25: int | None = None, sold_median: int | None = None,
                       sold_p75: int | None = None, listed_price: int | None = None,
@@ -744,16 +751,21 @@ def upsert_sale_stats(conn: sqlite3.Connection, *, player_id: str, n_sales: int,
     at = at or datetime.now(timezone.utc)
     conn.execute(
         """INSERT INTO sale_stats (player_id, title, n_sales, window_hours,
+              band_from_sales, band_window_hours,
               sales_per_hour, sold_p25, sold_median, sold_p75, listed_price,
               sold_vs_listed, computed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(player_id) DO UPDATE SET
              title=excluded.title, n_sales=excluded.n_sales,
-             window_hours=excluded.window_hours, sales_per_hour=excluded.sales_per_hour,
+             window_hours=excluded.window_hours,
+             band_from_sales=excluded.band_from_sales,
+             band_window_hours=excluded.band_window_hours,
+             sales_per_hour=excluded.sales_per_hour,
              sold_p25=excluded.sold_p25, sold_median=excluded.sold_median,
              sold_p75=excluded.sold_p75, listed_price=excluded.listed_price,
              sold_vs_listed=excluded.sold_vs_listed, computed_at=excluded.computed_at""",
-        (player_id, title, int(n_sales), window_hours, sales_per_hour, sold_p25,
+        (player_id, title, int(n_sales), window_hours, band_from_sales,
+         band_window_hours, sales_per_hour, sold_p25,
          sold_median, sold_p75, listed_price, sold_vs_listed, bucket_timestamp(at)),
     )
 

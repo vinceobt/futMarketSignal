@@ -39,16 +39,39 @@ logger = logging.getLogger(__name__)
 
 MIN_SALES = 5          # below this the percentiles are noise
 DEFAULT_DELAY = 1.5
+# The feed returns ~100 sales, which on a mid-liquidity card spans 15+ hours. If
+# the price trended over that window, the median of all of them is a price that
+# no longer exists: a real case quoted a 53,500 band while the card traded at
+# 74,500. So the tradeable band comes from the most RECENT sales only. The rate
+# still uses the full window, because a rate needs a span to be measured over.
+RECENT_SALES = 10
+RECENT_HOURS = 2.0
+
+
+def _recent_slice(sales: list[tuple]) -> list[tuple]:
+    """The sales that reflect the price you can actually trade at right now."""
+    if not sales:
+        return sales
+    newest = max(t for t, _ in sales)
+    within = [s for s in sales
+              if (newest - s[0]).total_seconds() / 3600.0 <= RECENT_HOURS]
+    # Prefer a time window, but never fall below a usable sample size.
+    return within if len(within) >= MIN_SALES else sales[-RECENT_SALES:]
 
 
 def summarise_sales(sales: list[tuple], listed: int | None) -> dict | None:
-    """Percentiles, activity rate and listed-price gap from raw completed sales."""
+    """Activity rate over the full window; price band from recent sales only."""
     if len(sales) < MIN_SALES:
         return None
     times = [t for t, _ in sales]
-    prices = np.array([p for _, p in sales], dtype=float)
     span_hours = max((max(times) - min(times)).total_seconds() / 3600.0, 0.01)
+
+    recent = _recent_slice(sales)
+    prices = np.array([p for _, p in recent], dtype=float)
     p25, median, p75 = (float(x) for x in np.percentile(prices, [25, 50, 75]))
+    recent_span = max(
+        (max(t for t, _ in recent) - min(t for t, _ in recent)).total_seconds() / 3600.0,
+        0.01)
     return {
         "n_sales": len(sales),
         "window_hours": round(span_hours, 3),
@@ -56,6 +79,8 @@ def summarise_sales(sales: list[tuple], listed: int | None) -> dict | None:
         "sold_p25": int(round(p25)),
         "sold_median": int(round(median)),
         "sold_p75": int(round(p75)),
+        "band_from_sales": len(recent),
+        "band_window_hours": round(recent_span, 3),
         "listed_price": int(listed) if listed else None,
         "sold_vs_listed": round(median / listed, 4) if listed else None,
     }
