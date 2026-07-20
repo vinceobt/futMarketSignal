@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The ML loop: fresh prices, recorded picks, and scorecard updates.
+     Placeholders filled by install_ml.sh. Runs every __INTERVAL_SEC__ seconds
+     while awake and once on each wake/login; the wrapper arms the next pmset
+     wake so it keeps firing through sleep. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.futmarket.ml</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO__/data/.ml_daily.rendered.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <key>StartInterval</key>
+  <integer>__INTERVAL_SEC__</integer>
+
+  <!-- Also run right after login/wake, so a missed cycle is picked up promptly
+       rather than waiting a full interval. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__REPO__/data/ml_daily.out</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO__/data/ml_daily.err</string>
+</dict>
+</plist>
