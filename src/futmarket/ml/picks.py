@@ -271,15 +271,26 @@ def generate(conn, *, source: str = "futgg", title: str = "fc26",
 
 
 def save(conn, picks: list[Pick], *, title: str = "fc26",
-         horizon_h: int = 168) -> int:
-    """Record today's picks so we can score them honestly later."""
+         horizon_days: int = 7) -> int:
+    """Record today's picks so the market can grade them later.
+
+    Stores the price you'd realistically have paid and the barriers it will be
+    judged against, so scoring never depends on re-deriving them afterwards.
+    """
     from datetime import datetime, timezone
     run = db.latest_model_run(conn, kind="direction", title=title)
-    run_id = run["run_id"] if run is not None else 0
+    run_id = run["run_id"] if run is not None else None
     now = datetime.now(timezone.utc)
+    saved = 0
     for p in picks:
-        db.insert_prediction(conn, subject_id=p.player_id, level="card",
-                             kind="direction", horizon_h=horizon_h, at=now,
-                             run_id=run_id, title=title, proba=p.confidence)
+        entry = p.buy_high or p.price_now
+        if db.insert_pick(conn, player_id=p.player_id, title=title, at=now,
+                          run_id=run_id, confidence=p.confidence,
+                          entry_price=entry, buy_low=p.buy_low,
+                          buy_high=p.buy_high, target_price=p.sell_target,
+                          stop_price=p.stop, horizon_days=horizon_days,
+                          sales_per_hour=p.sales_per_hour,
+                          reasons="; ".join(p.reasons)):
+            saved += 1
     conn.commit()
-    return len(picks)
+    return saved

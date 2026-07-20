@@ -223,6 +223,33 @@ CREATE TABLE IF NOT EXISTS predictions (
   PRIMARY KEY (subject_id, level, kind, horizon_h, timestamp)
 );
 
+-- Every recommendation the app has ever made, with what actually happened to it.
+-- This is the track record: without it we only ever know whether a pick looked
+-- reasonable, never whether it made coins. Scored against the same barriers the
+-- model was trained on, so the scorecard and the labels agree.
+CREATE TABLE IF NOT EXISTS pick_log (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  player_id      TEXT NOT NULL,
+  title          TEXT NOT NULL DEFAULT 'fc26',
+  picked_at      DATETIME NOT NULL,
+  run_id         INTEGER,
+  confidence     REAL,
+  entry_price    INTEGER NOT NULL,     -- what you would realistically have paid
+  buy_low        INTEGER,
+  buy_high       INTEGER,
+  target_price   INTEGER NOT NULL,
+  stop_price     INTEGER NOT NULL,
+  horizon_days   INTEGER NOT NULL,
+  sales_per_hour REAL,
+  reasons        TEXT,
+  status         TEXT NOT NULL DEFAULT 'open',  -- open | target | stop | expired
+  exit_price     INTEGER,
+  scored_at      DATETIME,
+  realized_pct   REAL,
+  UNIQUE(player_id, picked_at)
+);
+CREATE INDEX IF NOT EXISTS idx_pick_log_status ON pick_log(status, picked_at);
+
 -- The model registry / training-run log: the "getting smarter over time" record.
 -- Each retrain writes a row with its walk-forward metrics + artifact path.
 CREATE TABLE IF NOT EXISTS model_runs (
@@ -735,6 +762,55 @@ def liquidity_by_tier(conn: sqlite3.Connection, tier: str,
     return conn.execute(
         "SELECT * FROM liquidity WHERE tier=? AND title=? ORDER BY score DESC",
         (tier, title)).fetchall()
+
+
+# ---- pick_log (the track record) ----
+
+def insert_pick(conn: sqlite3.Connection, *, player_id: str, entry_price: int,
+                target_price: int, stop_price: int, horizon_days: int,
+                at: datetime, title: str = "fc26", run_id: int | None = None,
+                confidence: float | None = None, buy_low: int | None = None,
+                buy_high: int | None = None, sales_per_hour: float | None = None,
+                reasons: str | None = None) -> bool:
+    """Record a recommendation. False if this card was already picked this minute."""
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO pick_log (player_id, title, picked_at, run_id,
+             confidence, entry_price, buy_low, buy_high, target_price, stop_price,
+             horizon_days, sales_per_hour, reasons)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (player_id, title, bucket_timestamp(at), run_id, confidence,
+         int(entry_price), buy_low, buy_high, int(target_price), int(stop_price),
+         int(horizon_days), sales_per_hour, reasons),
+    )
+    return cur.rowcount == 1
+
+
+def open_picks(conn: sqlite3.Connection, *, title: str = "fc26") -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM pick_log WHERE status='open' AND title=? ORDER BY picked_at",
+        (title,)).fetchall()
+
+
+def close_pick(conn: sqlite3.Connection, pick_id: int, *, status: str,
+               exit_price: int, realized_pct: float,
+               at: datetime | None = None) -> None:
+    conn.execute(
+        "UPDATE pick_log SET status=?, exit_price=?, realized_pct=?, scored_at=? "
+        "WHERE id=?",
+        (status, int(exit_price), realized_pct,
+         bucket_timestamp(at or datetime.now(timezone.utc)), pick_id))
+
+
+def picks_log(conn: sqlite3.Connection, *, title: str = "fc26",
+              status: str | None = None, limit: int = 100) -> list[sqlite3.Row]:
+    clauses, params = ["title=?"], [title]
+    if status:
+        clauses.append("status=?")
+        params.append(status)
+    params.append(limit)
+    return conn.execute(
+        f"SELECT * FROM pick_log WHERE {' AND '.join(clauses)} "
+        f"ORDER BY picked_at DESC LIMIT ?", tuple(params)).fetchall()
 
 
 # ---- sale_stats (what cards really sold for) ----

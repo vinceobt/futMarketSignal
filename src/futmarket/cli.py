@@ -182,6 +182,43 @@ def cmd_collect_bulk(args) -> None:
           f"({res['unknown']:,} priced ids not in registry)")
 
 
+def cmd_scorecard(args) -> None:
+    from .services import scorecard
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    source = _resolve_source(conn, args.source, config)
+
+    res = scorecard.score_open_picks(conn, source=source, tax_rate=config.tax_rate)
+    print(f"scored {res['checked']} open pick(s): {res['target']} hit target, "
+          f"{res['stop']} stopped, {res['expired']} expired, "
+          f"{res['still_open']} still running\n")
+
+    s = scorecard.summary(conn)
+    if not s.get("closed"):
+        print(f"{s.get('total', 0)} pick(s) recorded, none resolved yet.")
+        print("Run `futmarket picks --save` daily, and `collect-bulk` regularly "
+              "so there are prices to score against.")
+        return
+    print("TRACK RECORD")
+    print(f"  picks recorded    {s['total']}  ({s['open']} still open)")
+    print(f"  hit target        {s['hit_target']}")
+    print(f"  hit stop          {s['hit_stop']}")
+    print(f"  expired flat      {s['expired']}")
+    print(f"  win rate          {s['win_rate']:.1%}")
+    print(f"  avg return/trade  {s['avg_return_pct']:+.2f}%  (net of tax)")
+    print(f"  profitable share  {s['profitable_share']:.1%}")
+
+    if args.list:
+        print("\nrecent picks:")
+        for r in db.picks_log(conn, limit=args.list):
+            meta = db.card_meta_get(conn, r["player_id"])
+            name = (meta["name"] if meta else r["player_id"])[:22]
+            got = f"{r['realized_pct']:+.1f}%" if r["realized_pct"] is not None else "--"
+            print(f"  {r['picked_at'][:10]}  {name:<22} {r['status']:<8} "
+                  f"entry {r['entry_price']:>9,}  {got:>8}")
+
+
 def cmd_picks(args) -> None:
     from .ml import picks as picks_mod
     config = _load(args)
@@ -824,6 +861,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--save", action="store_true",
                    help="record these picks so they can be scored later")
     p.set_defaults(func=cmd_picks)
+
+    p = sub.add_parser("scorecard",
+                       help="score past picks and show the real track record")
+    p.add_argument("--source", default=None)
+    p.add_argument("--list", type=int, default=0, metavar="N",
+                   help="also list the N most recent picks")
+    p.set_defaults(func=cmd_scorecard)
 
     p = sub.add_parser("sale-stats",
                        help="fetch what cards REALLY sold for (true price band + trade rate)")
