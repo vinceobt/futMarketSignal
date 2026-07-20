@@ -182,6 +182,33 @@ def cmd_collect_bulk(args) -> None:
           f"({res['unknown']:,} priced ids not in registry)")
 
 
+def cmd_social(args) -> None:
+    from .services import social
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    if args.show:
+        rows = social.buzz_table(conn, limit=args.show)
+        if not rows:
+            print("no buzz recorded yet — run `futmarket social`")
+            return
+        print(f"{'card':<26}{'mentions':>9}{'lean':>8}")
+        print("-" * 43)
+        for r in rows:
+            lean = r["sentiment"] or 0
+            arrow = "bullish" if lean > 0.15 else "bearish" if lean < -0.15 else "mixed"
+            print(f"{(r['name'] or r['player_id'])[:24]:<26}{r['mentions']:>9}{arrow:>8}")
+        return
+    try:
+        res = social.collect(conn, reddit=not args.no_reddit,
+                             youtube=not args.no_youtube)
+    except Exception as exc:
+        sys.exit(str(exc))
+    print(f"social: {res['posts']} posts fetched, {res['matched']} mentioned a "
+          f"known player, {res['cards']} card signals stored "
+          f"({res['names_indexed']} names indexed)")
+
+
 def cmd_insights(args) -> None:
     from .ml import insights
     config = _load(args)
@@ -873,6 +900,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--save", action="store_true",
                    help="record these picks so they can be scored later")
     p.set_defaults(func=cmd_picks)
+
+    p = sub.add_parser("social",
+                       help="collect Reddit/YouTube chatter and match it to cards")
+    p.add_argument("--no-reddit", action="store_true")
+    p.add_argument("--no-youtube", action="store_true")
+    p.add_argument("--show", type=int, default=None, metavar="N",
+                   help="show the N most-talked-about cards instead of collecting")
+    p.set_defaults(func=cmd_social)
 
     p = sub.add_parser("insights",
                        help="recompute the cached market rhythms the dashboard shows")

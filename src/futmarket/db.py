@@ -174,6 +174,25 @@ CREATE TABLE IF NOT EXISTS liquidity (
 );
 CREATE INDEX IF NOT EXISTS idx_liquidity_tier ON liquidity(title, tier);
 
+-- What the crowd is saying about a card. Volume is the real signal: a player
+-- being discussed ten times more than usual is information regardless of whether
+-- the talk reads positive. Sentiment is a crude bullish/bearish lean from trader
+-- vocabulary ("invest", "dump"), which in this domain beats a general-purpose
+-- model that would misread "crash" inside a card name.
+CREATE TABLE IF NOT EXISTS sentiment_signals (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  player_id     TEXT,                    -- NULL = market-wide chatter
+  platform      TEXT NOT NULL,           -- reddit | youtube | x
+  timestamp     DATETIME NOT NULL,
+  mention_count INTEGER NOT NULL,
+  sentiment     REAL,                    -- -1 bearish .. +1 bullish
+  buzz_z        REAL,                    -- how anomalous vs this card's own baseline
+  raw_ref       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sentiment_player ON sentiment_signals(player_id, timestamp);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sentiment_unique
+  ON sentiment_signals(player_id, platform, timestamp);
+
 -- What a card ACTUALLY changed hands for, from fut.gg's completed-auction feed.
 -- The lowest listing is often a mispriced snipe nobody can realistically catch;
 -- these percentiles are the true going rate, and (p25, p75) is the band a buy
@@ -762,6 +781,33 @@ def liquidity_by_tier(conn: sqlite3.Connection, tier: str,
     return conn.execute(
         "SELECT * FROM liquidity WHERE tier=? AND title=? ORDER BY score DESC",
         (tier, title)).fetchall()
+
+
+# ---- sentiment_signals (what the crowd is saying) ----
+
+def insert_sentiment(conn: sqlite3.Connection, *, player_id: str, platform: str,
+                     at: datetime, mention_count: int,
+                     sentiment: float | None = None,
+                     buzz_z: float | None = None,
+                     raw_ref: str | None = None) -> None:
+    """One player's buzz on one platform at one moment. Upserts on the minute so
+    a re-run doesn't inflate the counts."""
+    conn.execute(
+        """INSERT INTO sentiment_signals (player_id, platform, timestamp,
+             mention_count, sentiment, buzz_z, raw_ref)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(player_id, platform, timestamp) DO UPDATE SET
+             mention_count=excluded.mention_count, sentiment=excluded.sentiment,
+             buzz_z=excluded.buzz_z""",
+        (player_id, platform, bucket_timestamp(at), int(mention_count),
+         sentiment, buzz_z, raw_ref))
+
+
+def sentiment_for(conn: sqlite3.Connection, player_id: str,
+                  limit: int = 50) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM sentiment_signals WHERE player_id=? "
+        "ORDER BY timestamp DESC LIMIT ?", (player_id, limit)).fetchall()
 
 
 # ---- pick_log (the track record) ----
