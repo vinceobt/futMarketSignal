@@ -33,8 +33,11 @@ DEFAULT_LIMIT = 20
 # Percentage returns are wildly misleading on near-discard cards: a 200-coin card
 # going to 263 is "+31%" but earns 63 coins and can't be bought in any volume.
 # Judge a pick on the coins it could actually make, not the percentage.
-MIN_PRICE = 5_000
-MIN_PROFIT_COINS = 2_000
+# A floor only to exclude discard-price noise, NOT to exclude cheap cards. Fodder
+# trading is a volume game: 700 coins on an 84-rated card, twenty at a time. A
+# 5,000 floor cut 69% of the market including the entire SBC fodder tier.
+MIN_PRICE = 1_000
+MIN_PROFIT_COINS = 400
 
 
 @dataclass

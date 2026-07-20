@@ -28,7 +28,12 @@ logger = logging.getLogger(__name__)
 RETURN_HORIZONS = (1, 3, 7, 14)
 RANGE_WINDOW = 30          # days defining a card's "recent range"
 VOL_WINDOW = 14
-MIN_HISTORY_DAYS = 20      # skip cards too new to describe
+# Just enough history to compute a short return. Deliberately low: newly
+# released cards ARE the trade -- a promo card crashes ~33% over four days and
+# bottoms around day nine, which is precisely the release_phase feature. A 20-day
+# minimum made every card in its release window invisible to the model, excluding
+# the single most tradeable pattern in the game.
+MIN_HISTORY_DAYS = 3
 
 
 def load_daily_prices(conn, *, source: str = "futgg", title: str = "fc26",

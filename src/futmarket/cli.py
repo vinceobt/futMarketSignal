@@ -813,7 +813,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--limit", type=int, default=20, help="how many candidates to show")
     p.add_argument("--min-confidence", type=float, default=0.30,
                    help="ignore cards the model is less sure about than this")
-    p.add_argument("--min-price", type=int, default=5000,
+    p.add_argument("--min-price", type=int, default=1000,
                    help="ignore near-discard cards (their %% moves are noise "
                         "and the coins aren't worth trading)")
     p.add_argument("--min-sales-per-hour", type=float, default=0.0,
