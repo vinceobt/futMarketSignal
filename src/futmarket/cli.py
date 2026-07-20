@@ -816,9 +816,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--min-price", type=int, default=1000,
                    help="ignore near-discard cards (their %% moves are noise "
                         "and the coins aren't worth trading)")
-    p.add_argument("--min-sales-per-hour", type=float, default=0.0,
+    p.add_argument("--min-sales-per-hour", type=float, default=3.0,
                    help="only cards that genuinely sell this often -- confidence "
-                        "is worthless if you cannot get out")
+                        "is worthless if you cannot get out. 0 disables the check, "
+                        "which lets in dead cards the model likes purely because "
+                        "%% moves are large on cheap prices")
     p.add_argument("--save", action="store_true",
                    help="record these picks so they can be scored later")
     p.set_defaults(func=cmd_picks)
