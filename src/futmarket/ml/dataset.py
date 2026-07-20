@@ -58,7 +58,12 @@ def load_daily_prices(conn, *, source: str = "futgg", title: str = "fc26",
 
     counts = daily.groupby("player_id", observed=True)["price"].transform("size")
     daily = daily[counts >= min_history_days]
-    return daily.sort_values(["player_id", "date"]).reset_index(drop=True)
+    daily = daily.sort_values(["player_id", "date"]).reset_index(drop=True)
+    # ~8k player_ids and ~300 dates repeated across 2M rows: as categories these
+    # cost a small dictionary plus an integer code, instead of 2M Python strings.
+    for col in ("player_id", "date"):
+        daily[col] = daily[col].astype("category")
+    return daily
 
 
 def add_card_features(daily: pd.DataFrame) -> pd.DataFrame:
@@ -118,7 +123,12 @@ def add_behaviour_features(frame: pd.DataFrame) -> pd.DataFrame:
     So we tell the model what day of the week it is and how old the card is.
     """
     out = frame.copy()
-    dates = pd.to_datetime(out["date"], format="%Y-%m-%d", errors="coerce")
+    # `date` is stored as a category to keep 2M rows cheap; datetime arithmetic
+    # needs real strings, so widen it here rather than pay for it everywhere.
+    raw_dates = out["date"]
+    if isinstance(raw_dates.dtype, pd.CategoricalDtype):
+        raw_dates = raw_dates.astype(str)
+    dates = pd.to_datetime(raw_dates, format="%Y-%m-%d", errors="coerce")
     out["day_of_week"] = dates.dt.dayofweek                    # 0 = Monday
     out["is_weekend_window"] = dates.dt.dayofweek.isin((3, 4, 5, 6)).astype(int)
 
@@ -143,16 +153,6 @@ def _liquidity(conn, title: str) -> pd.DataFrame:
                                        "liq_updates_per_day"])
 
 
-def _explode_cohorts(frame: pd.DataFrame) -> pd.DataFrame:
-    """One row per (card, day, cohort it belongs to)."""
-    records = frame.to_dict("records")
-    keys = [cohorts.cohort_keys(r) for r in records]
-    repeat = np.fromiter((len(k) for k in keys), dtype=int, count=len(keys))
-    exploded = frame.loc[frame.index.repeat(repeat)].copy()
-    exploded["cohort_key"] = [k for group in keys for k in group]
-    return exploded
-
-
 def _lifecycle_frame(conn, dates, title: str) -> pd.DataFrame:
     life = lifecycle.load(conn, title=title)
     return pd.DataFrame([{"date": d, **life.features(d)} for d in sorted(set(dates))])
@@ -171,16 +171,22 @@ def build_dataset(conn, *, source: str = "futgg", title: str = "fc26",
     frame = frame.merge(_attributes(conn, title), on="player_id", how="left")
     frame = add_behaviour_features(frame)
 
-    exploded = _explode_cohorts(frame)
-    indices = cohorts.build_indices(
-        exploded[["cohort_key", "date", "price"]].copy())
-    frame = cohorts.attach_cohort_features(exploded, indices)
+    # Price band is a cohort dimension, so derive it before grouping.
+    frame["band"] = cohorts.price_band_series(frame["price"])
+    frame = cohorts.add_cohort_features(frame)
 
     frame = frame.merge(_lifecycle_frame(conn, frame["date"], title),
                         on="date", how="left")
     frame = frame.merge(_liquidity(conn, title), on="player_id", how="left")
 
     frame = frame.sort_values(["date", "player_id"]).reset_index(drop=True)
+    # float64 buys no accuracy for features whose inputs are integer coin prices.
+    wide = frame.select_dtypes(include=["float64"]).columns
+    frame[wide] = frame[wide].astype("float32")
+    # Card attributes repeat heavily (30 leagues, ~180 versions) -- same trick.
+    for col in ("position", "league", "nation", "version", "band", "liq_tier"):
+        if col in frame.columns:
+            frame[col] = frame[col].astype("category")
     logger.info("dataset built: %d rows x %d cols, %d cards, %s..%s",
                 len(frame), frame.shape[1], frame["player_id"].nunique(),
                 frame["date"].min(), frame["date"].max())

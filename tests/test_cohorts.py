@@ -32,76 +32,78 @@ def test_price_bands():
     assert cohorts.price_band(0) is None
 
 
-# ---- indices --------------------------------------------------------------
+# ---- cohort moves and relative strength ----------------------------------
 
-def _daily(rows):
-    return pd.DataFrame(rows, columns=["cohort_key", "date", "price"])
+def _frame(rows):
+    return pd.DataFrame(rows)
 
 
-def test_build_indices_medians_and_returns():
+def _members(value, date, price, n=6, dim="rating", start=0):
+    """n cards sharing a cohort on one day, so it clears MIN_COHORT_MEMBERS."""
+    return [{"player_id": f"{dim}{value}-{start+i}", "date": date, "price": price,
+             dim: value} for i in range(n)]
+
+
+def test_cohort_move_is_the_group_median_change():
+    rows = _members("84", "2026-01-01", 100) + _members("84", "2026-01-02", 200)
+    out = cohorts.add_cohort_features(_frame(rows), dims=("rating",), horizons=(1,))
+    day2 = out[out["date"] == "2026-01-02"]
+    assert day2["cohort_ret_1d"].iloc[0] == 100.0     # 100 -> 200
+    assert day2["n_cohorts"].iloc[0] == 1
+
+
+def test_thin_cohorts_are_ignored():
+    rows = _members("99", "2026-01-01", 100, n=2) + _members("99", "2026-01-02", 200, n=2)
+    out = cohorts.add_cohort_features(_frame(rows), dims=("rating",), horizons=(1,))
+    assert out["cohort_ret_1d"].isna().all()
+    assert (out["n_cohorts"] == 0).all()
+
+
+def test_relative_strength_is_own_move_minus_the_group():
+    rows = _members("84", "2026-01-01", 100) + _members("84", "2026-01-02", 200)
+    frame = _frame(rows)
+    frame["ret_1d"] = 0.0
+    frame.loc[frame["date"] == "2026-01-02", "ret_1d"] = 150.0   # beat the group
+    out = cohorts.add_cohort_features(frame, dims=("rating",), horizons=(1,))
+    day2 = out[out["date"] == "2026-01-02"]
+    assert day2["rel_strength_1d"].iloc[0] == 50.0    # 150 own - 100 cohort
+
+
+def test_multiple_dimensions_are_averaged():
+    """A card in two cohorts moving +2% and +6% sees a +4% sector move.
+
+    The two cohorts are kept disjoint apart from the test card itself, so each
+    group's median reflects only its own dimension.
+    """
     rows = []
-    # 5 members so the cohort clears MIN_COHORT_MEMBERS; price doubles day 2
-    for day, price in (("2026-01-01", 100), ("2026-01-02", 200)):
-        for i in range(5):
-            rows.append(("rating:84", day, price))
-    idx = cohorts.build_indices(_daily(rows))
-    assert list(idx["cohort_median"]) == [100, 200]
-    assert idx["cohort_members"].tolist() == [5, 5]
-    # day-2 return vs day-1 = +100%
-    assert idx.loc[idx["date"] == "2026-01-02", "cohort_ret_1d"].iloc[0] == 100.0
+    for day, rating_price, st_price in (("2026-01-01", 100, 100),
+                                        ("2026-01-02", 102, 106)):
+        # rating-84 peers: all goalkeepers, so they don't join the ST cohort
+        rows += [{"player_id": f"r{i}", "date": day, "price": rating_price,
+                  "rating": "84", "position": "GK"} for i in range(6)]
+        # ST peers: all rated 99, so they don't join the rating-84 cohort
+        rows += [{"player_id": f"s{i}", "date": day, "price": st_price,
+                  "rating": "99", "position": "ST"} for i in range(6)]
+        # the card under test belongs to both
+        rows.append({"player_id": "both", "date": day, "price": rating_price,
+                     "rating": "84", "position": "ST"})
+
+    out = cohorts.add_cohort_features(_frame(rows), dims=("rating", "position"),
+                                      horizons=(1,))
+    card = out[(out["player_id"] == "both") & (out["date"] == "2026-01-02")]
+    assert card["n_cohorts"].iloc[0] == 2
+    # rating cohort +2%, position cohort +6% -> mean +4%
+    assert round(float(card["cohort_ret_1d"].iloc[0]), 3) == 4.0
 
 
-def test_build_indices_drops_thin_cohorts():
-    rows = [("rating:99", "2026-01-01", 100)] * 2      # only 2 members
-    idx = cohorts.build_indices(_daily(rows))
-    assert idx.empty
+def test_empty_frame_is_safe():
+    out = cohorts.add_cohort_features(pd.DataFrame(
+        {"player_id": [], "date": [], "price": [], "rating": []}), horizons=(1,))
+    assert "cohort_ret_1d" in out.columns and len(out) == 0
 
 
-def test_build_indices_empty_input():
-    idx = cohorts.build_indices(pd.DataFrame(columns=["cohort_key", "date", "price"]))
-    assert idx.empty and "cohort_ret_1d" in idx.columns
-
-
-# ---- attaching to samples -------------------------------------------------
-
-def test_attach_cohort_features_relative_strength():
-    # one card in one cohort; card rose 10%, its cohort rose 4% -> rel +6
-    samples = pd.DataFrame([
-        {"player_id": "p1", "date": "2026-01-02", "cohort_key": "rating:84", "ret_1d": 10.0,
-         "ret_7d": 0.0},
-    ])
-    indices = pd.DataFrame([
-        {"cohort_key": "rating:84", "date": "2026-01-02", "cohort_median": 100.0,
-         "cohort_members": 9, "cohort_ret_1d": 4.0, "cohort_ret_7d": 0.0},
-    ])
-    out = cohorts.attach_cohort_features(samples, indices)
-    assert len(out) == 1
-    assert out["cohort_ret_1d"].iloc[0] == 4.0
-    assert out["rel_strength_1d"].iloc[0] == 6.0
-    assert out["n_cohorts"].iloc[0] == 1
-
-
-def test_attach_averages_multiple_cohorts():
-    # card belongs to two cohorts moving +2% and +6% -> sector move averages +4%
-    samples = pd.DataFrame([
-        {"player_id": "p1", "date": "2026-01-02", "cohort_key": "rating:84", "ret_1d": 10.0},
-        {"player_id": "p1", "date": "2026-01-02", "cohort_key": "position:ST", "ret_1d": 10.0},
-    ])
-    indices = pd.DataFrame([
-        {"cohort_key": "rating:84", "date": "2026-01-02", "cohort_median": 100.0,
-         "cohort_members": 9, "cohort_ret_1d": 2.0},
-        {"cohort_key": "position:ST", "date": "2026-01-02", "cohort_median": 100.0,
-         "cohort_members": 9, "cohort_ret_1d": 6.0},
-    ])
-    out = cohorts.attach_cohort_features(samples, indices, horizons=(1,))
-    assert len(out) == 1                       # collapsed back to one row per card/day
-    assert out["cohort_ret_1d"].iloc[0] == 4.0
-    assert out["rel_strength_1d"].iloc[0] == 6.0
-    assert out["n_cohorts"].iloc[0] == 2
-
-
-def test_attach_handles_empty_indices():
-    samples = pd.DataFrame([
-        {"player_id": "p1", "date": "2026-01-02", "cohort_key": "rating:84", "ret_1d": 5.0}])
-    out = cohorts.attach_cohort_features(samples, pd.DataFrame(), horizons=(1,))
-    assert len(out) == 1 and np.isnan(out["cohort_ret_1d"].iloc[0])
+def test_price_band_series_matches_scalar():
+    prices = pd.Series([500, 8_000, 20_000, 100_000, 5_000_000, 0])
+    banded = list(cohorts.price_band_series(prices))
+    assert banded[:5] == [cohorts.price_band(p) for p in prices[:5]]
+    assert pd.isna(banded[5])

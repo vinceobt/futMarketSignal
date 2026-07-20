@@ -163,3 +163,16 @@ def test_behaviour_features_survive_missing_release_date():
     out = dataset.add_behaviour_features(frame)
     assert out["day_of_week"].iloc[0] == 4
     assert pd.isna(out["days_since_card_release"].iloc[0])
+
+
+def test_behaviour_features_handle_categorical_dates():
+    """`date` is a category in the real pipeline (2M rows); datetime arithmetic
+    must still work. Plain-string fixtures hid this until it hit live data."""
+    frame = pd.DataFrame({
+        "player_id": ["p"] * 2,
+        "date": pd.Series(["2026-07-17", "2026-07-20"]).astype("category"),
+        "price": [100, 100],
+        "release_date": ["2026-07-10", "2026-07-10"]})
+    out = dataset.add_behaviour_features(frame)
+    assert list(out["day_of_week"]) == [4, 0]
+    assert list(out["days_since_card_release"]) == [7, 10]
