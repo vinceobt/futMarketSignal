@@ -51,10 +51,11 @@ def build_run_summary(conn, *, title: str = "fc26", top: int = 6) -> str:
                 lines.append(f"<{p['url']}>")
 
     s = scorecard.summary(conn, title=title)
-    if s.get("closed"):
+    if s.get("graded"):
         lines.append(
-            f"📊 Record: {s['hit_target']}W-{s['hit_stop']}L · "
-            f"{s['win_rate']:.0%} win (of {s['closed']} graded, {s['open']} still open)")
+            f"📊 Record: {s['hit_target']}W-{s['hit_stop']}L · {s['win_rate']:.0%} win · "
+            f"{s['return_on_capital_pct']:+.1f}% on capital "
+            f"({s['coins_pnl']:+,} coins over {s['graded']} trades, {s['open']} open)")
     else:
         lines.append(f"📊 Record: {s.get('total', 0)} picks logged, none graded yet.")
 

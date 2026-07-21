@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 TARGET, STOP, EXPIRED = "target", "stop", "expired"
 
+# Below this a "win" is a handful of coins on a card nobody buys — a percentage
+# move that's pure noise and unfillable. Judge the track record only on cards you
+# could actually trade, so one lucky penny-card can't fake a good week.
+MIN_TRADEABLE_PRICE = 1000
+
 
 def _parse(ts: str) -> datetime:
     return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
@@ -78,25 +83,47 @@ def score_open_picks(conn, *, title: str = "fc26", source: str = "futgg",
     return res
 
 
-def summary(conn, *, title: str = "fc26") -> dict:
-    """The honest headline: how the recommendations have actually done."""
+def summary(conn, *, title: str = "fc26", min_price: int = MIN_TRADEABLE_PRICE) -> dict:
+    """The honest headline: how the recommendations have actually done.
+
+    Judged in *coins*, not percentages, and only on cards you could actually
+    trade (>= ``min_price``). The headline number is the **return on capital** —
+    if you'd bought one of every pick, how did the whole pile do — which weights
+    each result by the coins at stake instead of letting a +285% penny-card count
+    the same as a real trade.
+    """
     rows = conn.execute(
-        "SELECT status, realized_pct, confidence FROM pick_log WHERE title=?",
+        "SELECT status, realized_pct, entry_price FROM pick_log WHERE title=?",
         (title,)).fetchall()
+    total = len(rows)
     closed = [r for r in rows if r["status"] != "open"]
-    wins = [r for r in closed if r["status"] == TARGET]
-    if not closed:
-        return {"total": len(rows), "closed": 0, "open": len(rows) - len(closed)}
-    realized = [r["realized_pct"] for r in closed if r["realized_pct"] is not None]
+    base = {"total": total, "open": total - len(closed), "closed": len(closed)}
+
+    # Only cards we could actually fill, and that the market has answered.
+    graded = [r for r in closed
+              if r["realized_pct"] is not None
+              and r["entry_price"] and r["entry_price"] >= min_price]
+    base["graded"] = len(graded)
+    if not graded:
+        return base
+
+    n = len(graded)
+    wins = [r for r in graded if r["status"] == TARGET]
+    rets = sorted(r["realized_pct"] for r in graded)
+    # net coins made/lost buying one of each card
+    coins = [r["entry_price"] * r["realized_pct"] / 100.0 for r in graded]
+    capital = sum(r["entry_price"] for r in graded)
+    median = rets[n // 2] if n % 2 else (rets[n // 2 - 1] + rets[n // 2]) / 2
+
     return {
-        "total": len(rows),
-        "open": len(rows) - len(closed),
-        "closed": len(closed),
+        **base,
         "hit_target": len(wins),
-        "hit_stop": sum(1 for r in closed if r["status"] == STOP),
-        "expired": sum(1 for r in closed if r["status"] == EXPIRED),
-        "win_rate": round(len(wins) / len(closed), 4),
-        "avg_return_pct": round(sum(realized) / len(realized), 3) if realized else 0.0,
-        "profitable_share": round(
-            sum(1 for r in realized if r > 0) / len(realized), 4) if realized else 0.0,
+        "hit_stop": sum(1 for r in graded if r["status"] == STOP),
+        "expired": sum(1 for r in graded if r["status"] == EXPIRED),
+        "win_rate": round(len(wins) / n, 4),
+        "profitable_share": round(sum(1 for r in graded if r["realized_pct"] > 0) / n, 4),
+        "coins_pnl": round(sum(coins)),
+        "avg_coins_per_trade": round(sum(coins) / n),
+        "return_on_capital_pct": round(sum(coins) / capital * 100, 2) if capital else 0.0,
+        "median_return_pct": round(median, 2),
     }

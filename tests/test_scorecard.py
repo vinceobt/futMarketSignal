@@ -89,14 +89,49 @@ def test_score_open_picks_closes_and_summarises(conn):
     assert futdb.open_picks(conn) == []
 
     s = scorecard.summary(conn)
-    assert s["closed"] == 1 and s["hit_target"] == 1
-    assert s["win_rate"] == 1.0 and s["avg_return_pct"] > 0
+    assert s["closed"] == 1 and s["graded"] == 1 and s["hit_target"] == 1
+    assert s["win_rate"] == 1.0
+    assert s["coins_pnl"] > 0 and s["return_on_capital_pct"] > 0
 
 
 def test_summary_with_nothing_resolved(conn):
     _pick(conn)
     s = scorecard.summary(conn)
-    assert s["closed"] == 0 and s["open"] == 1
+    assert s["closed"] == 0 and s["open"] == 1 and s["graded"] == 0
+
+
+def _closed_pick(conn, pid, *, entry, exit_price, target, at):
+    """Log a pick and immediately close it at a known exit, for summary tests."""
+    futdb.upsert_card_meta(conn, {"player_id": pid, "name": pid})
+    futdb.insert_pick(conn, player_id=pid, entry_price=entry, target_price=target,
+                      stop_price=int(entry * 0.9), horizon_days=7, at=at)
+    pick = [p for p in futdb.open_picks(conn) if p["player_id"] == pid][0]
+    realized = (exit_price * 0.95 / entry - 1) * 100
+    futdb.close_pick(conn, pick["id"], status="target", exit_price=exit_price,
+                     realized_pct=realized, at=at + timedelta(days=1))
+    conn.commit()
+
+
+def test_cheap_penny_card_cannot_fake_the_record(conn):
+    """A 200-coin card that 'tripled' must barely move return-on-capital, while a
+    real 50k trade that lost dominates — the whole point of coin-weighting."""
+    # penny card: 200 -> 700 on paper (+232% net), but only ~475 coins
+    _closed_pick(conn, "penny", entry=200, exit_price=700, target=700, at=PICKED)
+    # real trade: 50k -> 46k, a genuine loss of thousands of coins
+    _closed_pick(conn, "real", entry=50_000, exit_price=46_000, target=65_000,
+                 at=PICKED + timedelta(minutes=1))
+
+    s = scorecard.summary(conn)
+    # the sub-1000 penny card is excluded from the judged set entirely
+    assert s["graded"] == 1
+    # capital-weighted view reflects the real trade: a loss
+    assert s["return_on_capital_pct"] < 0 and s["coins_pnl"] < 0
+
+
+def test_summary_reports_zero_when_only_junk_resolved(conn):
+    _closed_pick(conn, "penny", entry=300, exit_price=900, target=900, at=PICKED)
+    s = scorecard.summary(conn)
+    assert s["closed"] == 1 and s["graded"] == 0     # nothing tradeable to judge
 
 
 def test_same_card_not_double_logged_in_a_minute(conn):

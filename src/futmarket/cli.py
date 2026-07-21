@@ -196,19 +196,23 @@ def cmd_scorecard(args) -> None:
           f"{res['still_open']} still running\n")
 
     s = scorecard.summary(conn)
-    if not s.get("closed"):
-        print(f"{s.get('total', 0)} pick(s) recorded, none resolved yet.")
+    if not s.get("graded"):
+        print(f"{s.get('total', 0)} pick(s) recorded, {s.get('closed', 0)} resolved, "
+              f"none tradeable enough to judge yet.")
         print("Run `futmarket picks --save` daily, and `collect-bulk` regularly "
               "so there are prices to score against.")
         return
-    print("TRACK RECORD")
+    pnl = s["coins_pnl"]
+    print("TRACK RECORD  (real, tradeable cards only — net of tax)")
     print(f"  picks recorded    {s['total']}  ({s['open']} still open)")
-    print(f"  hit target        {s['hit_target']}")
-    print(f"  hit stop          {s['hit_stop']}")
-    print(f"  expired flat      {s['expired']}")
-    print(f"  win rate          {s['win_rate']:.1%}")
-    print(f"  avg return/trade  {s['avg_return_pct']:+.2f}%  (net of tax)")
-    print(f"  profitable share  {s['profitable_share']:.1%}")
+    print(f"  graded            {s['graded']}   target {s['hit_target']} · "
+          f"stop {s['hit_stop']} · flat {s['expired']}")
+    print(f"  win rate          {s['win_rate']:.0%}")
+    print(f"  return on capital {s['return_on_capital_pct']:+.1f}%   "
+          f"← the number that matters (weights by coins at stake)")
+    print(f"  total P&L         {pnl:+,} coins   "
+          f"({s['avg_coins_per_trade']:+,}/trade)")
+    print(f"  median trade      {s['median_return_pct']:+.1f}%")
 
     if args.list:
         print("\nrecent picks:")
