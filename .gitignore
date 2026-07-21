@@ -1,13 +1,17 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
-//data/
 *.egg-info/
 .pytest_cache/
-# Trained model artifacts are regenerable outputs of `futmarket train`,
-# not source. The model_runs table records which artifact produced which metrics.
-data/models/
 
-# Credentials — never commit these
+# Node — never track dependencies (the old frontend is gone)
+node_modules/
+frontend/
+
+# Data warehouse, logs, generated scripts, trained models — regenerable + large
+data/
+
+# Credentials — never commit
 .env
 .x_session.json

@@ -8,8 +8,6 @@ When an access key is configured it gates the page (supplied as `?key=…`, then
 remembered in a cookie), so the dashboard can be exposed on the network safely.
 """
 
-from __future__ import annotations
-
 import hmac
 
 from . import db, security

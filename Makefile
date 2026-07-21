@@ -1,4 +1,4 @@
-# FUT Market Desk — common commands.
+# futmarket — common commands.
 # Uses the project virtualenv directly, so you never need to `source .venv/bin/activate`.
 # Run `make` or `make help` to see everything.
 
@@ -12,38 +12,38 @@ PORT ?= 8000
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install dashboard serve collect backtest signals players build-features test clean \
-        autonomous-install autonomous-uninstall autonomous-status autonomous-log
+.PHONY: help install dashboard serve collect-bulk picks scorecard train \
+        build-dataset test clean autonomous-install autonomous-status autonomous-log
 
 help: ## Show this help
-	@echo "FUT Market Desk — make targets:"
+	@echo "futmarket — make targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[1m%-16s\033[0m %s\n", $$1, $$2}'
+	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[1m%-18s\033[0m %s\n", $$1, $$2}'
 	@echo
 	@echo "Using interpreter: $(PY)"
 
-install: ## Install the project (+ web extras) into the venv
-	uv sync --extra web --extra dev 2>/dev/null || $(PY) -m pip install -e '.[web,dev]'
+install: ## Install the project (+ web/ml extras) into the venv
+	uv sync --extra web --extra ml --extra dev 2>/dev/null || $(PY) -m pip install -e '.[web,ml,dev]'
 
-dashboard: ## Launch the web dashboard (API + scraper worker) at HOST:PORT
+dashboard: ## Launch the live dashboard at HOST:PORT (open /ml)
 	$(FUT) dashboard --host $(HOST) --port $(PORT)
 
 serve: dashboard ## Alias for `dashboard`
 
-collect: ## Run one polite scrape pass over the whole watchlist
-	$(FUT) collect-once
+collect-bulk: ## Snapshot the whole market's prices in one pass
+	$(FUT) collect-bulk
 
-backtest: ## Backtest the signal rule vs baselines on stored history
-	$(FUT) backtest
+picks: ## What to buy right now, at what price, and why
+	$(FUT) picks
 
-signals: ## Evaluate + store current BUY/SELL/HOLD signals
-	$(FUT) signals
+scorecard: ## Score past picks and show the real track record
+	$(FUT) scorecard
 
-players: ## List tracked players with snapshot counts
-	$(FUT) players
+train: ## Train + walk-forward validate the models
+	$(FUT) train
 
-build-features: ## Recompute the features table from stored prices
-	$(FUT) build-features
+build-dataset: ## Assemble the ML feature matrix
+	$(FUT) build-dataset
 
 test: ## Run the test suite
 	$(PY) -m pytest -q
@@ -51,18 +51,12 @@ test: ## Run the test suite
 clean: ## Remove caches (keeps data/ and the DB)
 	rm -rf .pytest_cache **/__pycache__ src/**/__pycache__
 
-autonomous-install: ## Collect 3x/hour (waking the Mac) + scan momentum every 6h (macOS)
-	bash scripts/install_autonomous.sh
+autonomous-install: ## Install the 24/7 ML loop as a macOS LaunchAgent
+	bash scripts/install_ml.sh
 
-autonomous-uninstall: ## Stop and remove both autonomous agents
-	bash scripts/uninstall_autonomous.sh
+autonomous-status: ## Show whether the ML/dashboard/awake agents are loaded
+	@launchctl list | grep futmarket || echo "no futmarket agents loaded"
+	@echo "--- recent ML cycle log ---"; tail -n 4 data/ml_daily.log 2>/dev/null || echo "(no log yet)"
 
-autonomous-status: ## Show whether the autonomous agents are loaded + next wake
-	@echo "--- collector ---"; launchctl print gui/$$(id -u)/com.futmarket.collect 2>/dev/null | grep -E "state|run interval" || echo "not loaded"
-	@echo "--- scanner ---"; launchctl print gui/$$(id -u)/com.futmarket.scan 2>/dev/null | grep -E "state|run interval" || echo "not loaded"
-	@echo "--- scheduled power events ---"; pmset -g sched
-	@echo "--- recent collect log ---"; tail -n 4 data/autonomous.log 2>/dev/null || echo "(no log yet)"
-	@echo "--- recent scan log ---"; tail -n 3 data/scan.log 2>/dev/null || echo "(no scan log yet)"
-
-autonomous-log: ## Follow the autonomous collector log
-	tail -f data/autonomous.log
+autonomous-log: ## Follow the ML cycle log
+	tail -f data/ml_daily.log
