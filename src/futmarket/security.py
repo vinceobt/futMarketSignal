@@ -95,11 +95,12 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
-    # The UI is fully self-hosted (no external scripts/styles/fonts/images),
-    # so a self-only policy is safe and blocks injected/exfiltrating content.
+    # The UI is fully self-hosted (no external scripts/styles/fonts/images).
+    # The live ML dashboard ships its CSS in an inline <style> block, so styles
+    # allow 'unsafe-inline'; scripts stay locked to 'self' (the real XSS guard).
     "Content-Security-Policy": (
         "default-src 'self'; img-src 'self' data:; "
-        "style-src 'self'; script-src 'self'; connect-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; "
         "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
     ),
 }
