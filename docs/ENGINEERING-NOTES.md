@@ -31,23 +31,32 @@ and still improving. Training never stops; it carries forward into each new game
 
 ---
 
-## 2. Current state (2026-07-20)
+## 2. Current state (2026-07-21)
 
-Working, end to end. `futmarket picks` produces real recommendations.
+Working, end to end, with a **command-center dashboard** you run everything from.
 
 | Layer | State |
 |---|---|
 | Card registry | 9,998 cards (8,231 tradeable) |
-| Price history | **2.5M snapshots**, 99.3% of tradeable cards, full season since 2025-09-08 |
-| Event calendar | 247 events — promos, SBCs, EA announcements |
-| Features | card behaviour + cohorts + lifecycle + weekly rhythm + release curve |
-| Models | scikit-learn HistGradientBoosting — forecast + direction heads |
-| Output | `futmarket picks` — buy band, sell target, stop, reasons, card URL |
+| Price history | **2.5M snapshots**, full season since 2025-09-08 |
+| Event calendar | 247 events; promos now classified by **type** (Icon/Hero/TOTS/…) |
+| Features | card behaviour + cohorts + lifecycle + weekly rhythm + release curve + **social buzz** + **major-promo distance** |
+| Models | scikit-learn HistGradientBoosting — forecast + direction heads (5-day horizon) |
+| Strategy | **`dip_v1`**: buy cheap/mid cards (< 40k) **on the dip** (oversold + near their own floor), per-card barriers, sell into resistance |
+| Output | `futmarket picks` (buy list) · `futmarket advise <card\|--rating N>` (consult) · dashboard `/ml` |
 
-**Honest status:** the model has a real but modest edge that is roughly **equal
-to trading costs** (~11% round trip). Profitable if you buy patiently near the
-listed price; unprofitable if you chase at market. It is not yet proven to make
-money live.
+### The pivotal finding (why the strategy is what it is)
+Backtest over 35k+ trades: the edge is **not** in barrier-tuning, it's in *what*
+you trade. Cheap/mid cards bought oversold-on-the-dip return **+5–11% on capital**
+net of tax; **expensive icons lose −8%** (priced efficiently, tax eats the margin)
+and were dragging the whole system negative. The old flat **+25%/−8%** barriers
+also stopped out on normal noise (cards swing ~17–24%/week). The current strategy
+trades only the dip on cheap/mid cards, sizes stop/target to each card's own range,
+and **backtests +4.4% on capital vs the old live −4.6%.**
+
+**Honest status:** the new strategy backtests positive but is **not yet proven
+live** — it only started recording `dip_v1` picks on 2026-07-21. Backtests flatter;
+the coin-weighted scorecard is the real judge. See §10.
 
 ---
 
@@ -227,3 +236,60 @@ Rate limits are real: use ~1.5–2s between per-card calls with exponential back
 - **Explain in trading terms**, not statistics.
 - **Be honest about negative results.** The edge-equals-costs finding matters more
   than any optimistic number.
+
+---
+
+## 10. Where we stopped (2026-07-21) — read this when you return
+
+The system is feature-complete and running 24/7. The next move is **not more
+building — it's reading the honest scoreboard after ~2 weeks of live trades.**
+
+### What was built (all committed, 214 tests passing)
+- **The dip strategy (`dip_v1`)** — see §2. Replaced the money-losing +25%/−8% engine.
+- **Honest, coin-weighted scorecard** — return-on-capital, judged on tradeable
+  cards net of tax + sell-slippage. Picks are **tagged by strategy**; the dashboard
+  and `futmarket scorecard` judge `dip_v1` alone, with `legacy` (old engine, ~−6%
+  on capital) shown separately. `scorecard --all` blends them.
+- **Consult** — `futmarket advise <name>` / `--rating N` / `--league …`; also the
+  dashboard search box + group chips. An honest read (BUY/WATCH/WAIT/AVOID) on any
+  card or group, no filters. Scored frame cached at `data/advise_features.pkl`.
+- **Command-center dashboard** (`/ml`) — Consult · Picks · Holding · Track record ·
+  Rhythms · Controls. Server-renders fragments; thin `/app.js`; read endpoints open,
+  `POST /api/run/*` guarded (same-origin + loopback-or-key). Job runner in
+  `services/jobs.py`.
+- **Sell alerts + Holding** — Discord SELL/CUT pings when a held pick hits
+  target/stop (`futmarket sell-alerts`, in the cycle); Holding panel on the dash.
+- **Phone/LAN access** — dashboard binds `0.0.0.0`; open `http://<mac-ip>:8899/`.
+  Reads open; actions need the key off-box. Key lives in the dashboard LaunchAgent
+  + `data/.dashboard_key`.
+- **Learning from everything** — features now include **social buzz** (Reddit/
+  YouTube/X, sparse) and **major-promo distance**; promos classified by type
+  (`ml/promos.py`), per-type market reaction shown on the dashboard.
+
+### What to check in ~2 weeks (the whole point)
+1. `futmarket scorecard` (or the dashboard Track record). **Look at `dip_v1`
+   return-on-capital**, not legacy. Target: beat the backtest's +4.4%, or at least
+   clear 0% net. It's very selective, so trades accumulate slowly.
+2. If `dip_v1` return-on-capital is **solidly positive** over a meaningful number of
+   graded trades → the strategy works; consider loosening the entry gate
+   (`entry_z_max`, `entry_floor_max_pct`, `max_price` in config.yaml) to trade more.
+3. If it's **around zero / negative** → the backtest didn't hold live (likely fill
+   friction on cheap fodder). Investigate execution: is `buy_high`/`sell_slippage_pct`
+   realistic? Are the cards actually fillable at the quoted band?
+
+### Open items / next moves (roughly by value)
+- **Prove it live** (above) — nothing to build, just read the number.
+- **Social + promo-type signals** are wired but sparse; they sharpen automatically
+  as data accumulates. Re-measure their model lift once weeks of data exist.
+- **News *content*** beyond promo type (what a specific announcement said) is still
+  unbuilt — the largest remaining research bet.
+- **Retrain cadence:** the 2-hourly cycle does NOT retrain. Retrain manually
+  (`futmarket train`, ~8 min) after meaningful new data, or add a weekly retrain.
+- **Watch out:** `dip_v1` picks are horizon-5, legacy are horizon-7 (that's how the
+  migration back-tagged them). Keep bumping `STRATEGY_VERSION` in `ml/picks.py` if
+  the trade logic changes again, so the record stays honest.
+
+### Running state
+Mac must stay **awake + plugged in** (LaunchAgents: `awake`, `dashboard`, `ml`).
+The `ml` cycle every 2h: collect-bulk → picks --save → sell-alerts → scorecard →
+notify. Dashboard: `http://localhost:8899/` (or the LAN IP from a phone).
