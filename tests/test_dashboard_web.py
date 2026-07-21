@@ -46,7 +46,7 @@ def test_render_group_read():
 
 
 def test_render_scorecard_full_empty_and_filled():
-    assert "none tradeable" in dashboard.render_scorecard_full(
+    assert "none graded yet" in dashboard.render_scorecard_full(
         {"total": 3, "closed": 1, "graded": 0}, [])
     sc = {"graded": 2, "win_rate": 0.5, "return_on_capital_pct": 4.4,
           "coins_pnl": 1200, "avg_coins_per_trade": 600, "median_return_pct": 3.0}

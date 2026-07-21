@@ -33,11 +33,15 @@ def _parse(ts: str) -> datetime:
 
 
 def score_pick(pick, prices: list[tuple[datetime, int]], *, tax_rate: float = 0.05,
+               sell_slippage_pct: float = 0.0,
                now: datetime | None = None) -> tuple[str, int, float] | None:
     """(status, exit_price, realized_pct) for one pick, or None if still open.
 
     Whichever barrier is touched first wins; if neither is touched by the
-    horizon, the position is marked out at the last observed price.
+    horizon, the position is marked out at the last observed price. The realized
+    return is net of EA's tax AND a sell-under-listing slippage, so it reflects
+    what you'd actually clear, not a paper gain (entry already models the buy
+    premium via ``buy_high``).
     """
     now = now or datetime.now(timezone.utc)
     picked = _parse(pick["picked_at"])
@@ -46,23 +50,31 @@ def score_pick(pick, prices: list[tuple[datetime, int]], *, tax_rate: float = 0.
     if entry <= 0:
         return None
 
+    # net proceeds per coin of sale price: after tax, then after selling slightly
+    # under the going rate to actually get filled.
+    sale_net = (1 - tax_rate) * (1 - sell_slippage_pct / 100.0)
+
+    def realized(price):
+        return (price * sale_net / entry - 1) * 100
+
     after = [(t, p) for t, p in prices if t > picked and p > 0]
     for t, price in after:
         if price >= pick["target_price"]:
-            return TARGET, price, (price * (1 - tax_rate) / entry - 1) * 100
+            return TARGET, price, realized(price)
         if price <= pick["stop_price"]:
-            return STOP, price, (price * (1 - tax_rate) / entry - 1) * 100
+            return STOP, price, realized(price)
 
     if now < deadline:
         return None                      # still running, no verdict yet
     if not after:
         return None                      # no prices seen since the pick
     last_price = after[-1][1]
-    return EXPIRED, last_price, (last_price * (1 - tax_rate) / entry - 1) * 100
+    return EXPIRED, last_price, realized(last_price)
 
 
 def score_open_picks(conn, *, title: str = "fc26", source: str = "futgg",
-                     tax_rate: float = 0.05, now: datetime | None = None) -> dict:
+                     tax_rate: float = 0.05, sell_slippage_pct: float = 0.0,
+                     now: datetime | None = None) -> dict:
     """Resolve every pick the market has answered. Returns counts by outcome."""
     now = now or datetime.now(timezone.utc)
     res = {"checked": 0, TARGET: 0, STOP: 0, EXPIRED: 0, "still_open": 0}
@@ -70,7 +82,8 @@ def score_open_picks(conn, *, title: str = "fc26", source: str = "futgg",
         res["checked"] += 1
         rows = db.snapshots(conn, pick["player_id"], source)
         prices = [(_parse(r["timestamp"]), int(r["price"])) for r in rows]
-        outcome = score_pick(pick, prices, tax_rate=tax_rate, now=now)
+        outcome = score_pick(pick, prices, tax_rate=tax_rate,
+                             sell_slippage_pct=sell_slippage_pct, now=now)
         if outcome is None:
             res["still_open"] += 1
             continue
@@ -83,7 +96,8 @@ def score_open_picks(conn, *, title: str = "fc26", source: str = "futgg",
     return res
 
 
-def summary(conn, *, title: str = "fc26", min_price: int = MIN_TRADEABLE_PRICE) -> dict:
+def summary(conn, *, title: str = "fc26", min_price: int = MIN_TRADEABLE_PRICE,
+            strategy: str | None = None) -> dict:
     """The honest headline: how the recommendations have actually done.
 
     Judged in *coins*, not percentages, and only on cards you could actually
@@ -91,10 +105,16 @@ def summary(conn, *, title: str = "fc26", min_price: int = MIN_TRADEABLE_PRICE) 
     if you'd bought one of every pick, how did the whole pile do — which weights
     each result by the coins at stake instead of letting a +285% penny-card count
     the same as a real trade.
+
+    ``strategy`` filters to picks made by one strategy (e.g. 'dip_v1'), so the
+    current approach is judged on its own, not blended with the old 'legacy' engine.
     """
-    rows = conn.execute(
-        "SELECT status, realized_pct, entry_price FROM pick_log WHERE title=?",
-        (title,)).fetchall()
+    sql = "SELECT status, realized_pct, entry_price FROM pick_log WHERE title=?"
+    params = [title]
+    if strategy is not None:
+        sql += " AND strategy=?"
+        params.append(strategy)
+    rows = conn.execute(sql, params).fetchall()
     total = len(rows)
     closed = [r for r in rows if r["status"] != "open"]
     base = {"total": total, "open": total - len(closed), "closed": len(closed)}

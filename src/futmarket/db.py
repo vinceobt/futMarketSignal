@@ -265,6 +265,7 @@ CREATE TABLE IF NOT EXISTS pick_log (
   exit_price     INTEGER,
   scored_at      DATETIME,
   realized_pct   REAL,
+  strategy       TEXT NOT NULL DEFAULT 'legacy', -- which strategy made this pick
   UNIQUE(player_id, picked_at)
 );
 CREATE INDEX IF NOT EXISTS idx_pick_log_status ON pick_log(status, picked_at);
@@ -310,6 +311,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "source" not in _column_names(conn, "market_events"):
         conn.execute(
             "ALTER TABLE market_events ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
+    # Which strategy made a pick. Existing rows are the old rules/+25%-8% engine, so
+    # they default to 'legacy' and the honest track record can judge the current
+    # strategy on its own without legacy losses dragging the number down.
+    if "strategy" not in _column_names(conn, "pick_log"):
+        conn.execute(
+            "ALTER TABLE pick_log ADD COLUMN strategy TEXT NOT NULL DEFAULT 'legacy'")
+        # One-time backfill: the dip strategy uses a 5-day horizon, the old engine
+        # used 7. Tag the already-saved dip picks correctly so the first batch isn't
+        # blended into legacy.
+        conn.execute("UPDATE pick_log SET strategy='dip_v1' WHERE horizon_days=5")
     conn.commit()
 
 
@@ -817,16 +828,16 @@ def insert_pick(conn: sqlite3.Connection, *, player_id: str, entry_price: int,
                 at: datetime, title: str = "fc26", run_id: int | None = None,
                 confidence: float | None = None, buy_low: int | None = None,
                 buy_high: int | None = None, sales_per_hour: float | None = None,
-                reasons: str | None = None) -> bool:
+                reasons: str | None = None, strategy: str = "legacy") -> bool:
     """Record a recommendation. False if this card was already picked this minute."""
     cur = conn.execute(
         """INSERT OR IGNORE INTO pick_log (player_id, title, picked_at, run_id,
              confidence, entry_price, buy_low, buy_high, target_price, stop_price,
-             horizon_days, sales_per_hour, reasons)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             horizon_days, sales_per_hour, reasons, strategy)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (player_id, title, bucket_timestamp(at), run_id, confidence,
          int(entry_price), buy_low, buy_high, int(target_price), int(stop_price),
-         int(horizon_days), sales_per_hour, reasons),
+         int(horizon_days), sales_per_hour, reasons, strategy),
     )
     return cur.rowcount == 1
 

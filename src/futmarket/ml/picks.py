@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 
 MIN_CONFIDENCE = 0.30        # below this the model isn't saying anything useful
 DEFAULT_LIMIT = 20
+# The strategy that makes these picks. Bump this when the trade logic changes so
+# the track record can judge each strategy on its own (not blended with the old
+# +25%/-8% engine, whose picks are tagged 'legacy').
+STRATEGY_VERSION = "dip_v1"
 MIN_PRICE = 1_000            # ignore near-discard noise
 MAX_PRICE = 40_000           # ignore efficiently-priced cards (icons) that lose after tax
 ENTRY_Z_MAX = -0.5           # only buy when this far below normal (the dip)
@@ -332,7 +336,8 @@ def save(conn, picks: list[Pick], *, title: str = "fc26",
                           buy_high=p.buy_high, target_price=p.sell_target,
                           stop_price=p.stop, horizon_days=horizon_days,
                           sales_per_hour=p.sales_per_hour,
-                          reasons="; ".join(p.reasons)):
+                          reasons="; ".join(p.reasons),
+                          strategy=STRATEGY_VERSION):
             saved += 1
     conn.commit()
     return saved

@@ -42,7 +42,8 @@ def _run_picks(conn, config: Config) -> str:
 
 def _grade(conn, config: Config) -> str:
     from .scorecard import score_open_picks
-    r = score_open_picks(conn, source=config.source, tax_rate=config.tax_rate)
+    r = score_open_picks(conn, source=config.source, tax_rate=config.tax_rate,
+                         sell_slippage_pct=config.sell_slippage_pct)
     return (f"{r['checked']} checked · {r['target']} hit target · "
             f"{r['stop']} stopped · {r['still_open']} still open")
 

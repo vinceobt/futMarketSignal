@@ -100,16 +100,42 @@ def test_summary_with_nothing_resolved(conn):
     assert s["closed"] == 0 and s["open"] == 1 and s["graded"] == 0
 
 
-def _closed_pick(conn, pid, *, entry, exit_price, target, at):
+def _closed_pick(conn, pid, *, entry, exit_price, target, at, strategy="legacy"):
     """Log a pick and immediately close it at a known exit, for summary tests."""
     futdb.upsert_card_meta(conn, {"player_id": pid, "name": pid})
     futdb.insert_pick(conn, player_id=pid, entry_price=entry, target_price=target,
-                      stop_price=int(entry * 0.9), horizon_days=7, at=at)
+                      stop_price=int(entry * 0.9), horizon_days=7, at=at,
+                      strategy=strategy)
     pick = [p for p in futdb.open_picks(conn) if p["player_id"] == pid][0]
     realized = (exit_price * 0.95 / entry - 1) * 100
     futdb.close_pick(conn, pick["id"], status="target", exit_price=exit_price,
                      realized_pct=realized, at=at + timedelta(days=1))
     conn.commit()
+
+
+def test_score_pick_applies_sell_slippage():
+    pick = dict(picked_at=PICKED.strftime("%Y-%m-%dT%H:%M:%SZ"), horizon_days=7,
+                entry_price=10_000, target_price=13_000, stop_price=9_200)
+    prices = _prices([(1, 13_500)])
+    _, _, r0 = scorecard.score_pick(pick, prices, sell_slippage_pct=0.0,
+                                    now=PICKED + timedelta(days=8))
+    _, _, r2 = scorecard.score_pick(pick, prices, sell_slippage_pct=2.0,
+                                    now=PICKED + timedelta(days=8))
+    assert r2 < r0                       # selling under the going rate nets less
+
+
+def test_summary_judges_the_current_strategy_alone(conn):
+    # a winning new-strategy pick and a losing legacy pick, both tradeable
+    _closed_pick(conn, "new", entry=10_000, exit_price=13_000, target=12_000,
+                 at=PICKED, strategy="dip_v1")
+    _closed_pick(conn, "old", entry=10_000, exit_price=8_000, target=13_000,
+                 at=PICKED + timedelta(minutes=1), strategy="legacy")
+    dip = scorecard.summary(conn, strategy="dip_v1")
+    legacy = scorecard.summary(conn, strategy="legacy")
+    both = scorecard.summary(conn)
+    assert dip["graded"] == 1 and dip["return_on_capital_pct"] > 0    # new: winning
+    assert legacy["graded"] == 1 and legacy["return_on_capital_pct"] < 0  # old: losing
+    assert both["graded"] == 2                                        # unfiltered = all
 
 
 def test_cheap_penny_card_cannot_fake_the_record(conn):

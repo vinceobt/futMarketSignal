@@ -232,12 +232,21 @@ def render_group_read(read) -> str:
             f'<h4>Best buys in the group</h4>{opp_html}</div>')
 
 
-def render_scorecard_full(sc, graded_rows) -> str:
-    """The honest track record: coin-weighted stats + recent graded trades."""
+def _legacy_line(legacy) -> str:
+    if not legacy or not legacy.get("graded"):
+        return ""
+    return (f'<p class="legacy-note">Legacy (old +25%/−8% engine, excluded above): '
+            f'{legacy["graded"]} graded · {legacy["return_on_capital_pct"]:+.1f}% '
+            f'on capital · {legacy["win_rate"]*100:.0f}% win</p>')
+
+
+def render_scorecard_full(sc, graded_rows, *, legacy=None) -> str:
+    """The honest track record: coin-weighted stats + recent graded trades, judged
+    on the current strategy; the old engine's record shown muted beneath."""
     if not sc.get("graded"):
-        return (f'<p class="empty">{sc.get("total", 0)} picks recorded, '
-                f'{sc.get("closed", 0)} resolved — none tradeable enough to grade '
-                f'yet. The record fills in as picks mature.</p>')
+        return (f'<p class="empty">{sc.get("total", 0)} current-strategy picks '
+                f'recorded, {sc.get("closed", 0)} resolved — none graded yet. The '
+                f'record fills in as the new picks mature.</p>{_legacy_line(legacy)}')
 
     def stat(k, n, s):
         return f'<div class="stat"><div class="k">{k}</div><div class="n">{n}</div><div class="s">{s}</div></div>'
@@ -262,7 +271,7 @@ def render_scorecard_full(sc, graded_rows) -> str:
     table = (f'<table class="record"><thead><tr><th>Card</th><th>Entry</th>'
              f'<th>Outcome</th><th>Net</th></tr></thead><tbody>{rows}</tbody></table>'
              if rows else "")
-    return f'<div class="stats4">{stats}</div>{table}'
+    return f'<div class="stats4">{stats}</div>{table}{_legacy_line(legacy)}'
 
 
 CONTROLS = [
@@ -296,15 +305,18 @@ def picks_fragment(conn, *, title: str = "fc26", limit: int = 12) -> str:
 
 
 def record_fragment(conn, *, title: str = "fc26") -> str:
-    """The full track-record HTML — used by the initial render and JS refresh."""
-    sc = scorecard.summary(conn, title=title)
+    """The full track-record HTML — judged on the current strategy, legacy shown
+    muted beneath so nothing is hidden."""
+    from .picks import STRATEGY_VERSION
+    sc = scorecard.summary(conn, title=title, strategy=STRATEGY_VERSION)
     graded = conn.execute(
         """SELECT p.player_id, p.entry_price, p.status, p.realized_pct, m.name
            FROM pick_log p LEFT JOIN card_meta m ON m.player_id = p.player_id
-           WHERE p.title = ? AND p.status IN ('target','stop','expired')
-             AND p.entry_price >= 1000
-           ORDER BY p.scored_at DESC LIMIT 12""", (title,)).fetchall()
-    return render_scorecard_full(sc, graded)
+           WHERE p.title = ? AND p.strategy = ?
+             AND p.status IN ('target','stop','expired') AND p.entry_price >= 1000
+           ORDER BY p.scored_at DESC LIMIT 12""", (title, STRATEGY_VERSION)).fetchall()
+    legacy = scorecard.summary(conn, title=title, strategy="legacy")
+    return render_scorecard_full(sc, graded, legacy=legacy)
 
 
 # --------------------------------------------------------------------- render
@@ -328,7 +340,8 @@ def render(conn, *, source: str = "futgg", title: str = "fc26",
     tiers = {t: q1("SELECT COUNT(*) FROM liquidity WHERE tier=?", (t,))
              for t in "ABC"}
 
-    sc = scorecard.summary(conn, title=title)
+    from .picks import STRATEGY_VERSION
+    sc = scorecard.summary(conn, title=title, strategy=STRATEGY_VERSION)
     run = db.latest_model_run(conn, kind="direction", title=title)
     metrics = {}
     if run and run["metrics_json"]:
@@ -632,6 +645,7 @@ table.record th{text-align:left;font-size:11px;text-transform:uppercase;letter-s
 table.record td{padding:7px 10px;border-bottom:1px solid var(--line)}
 table.record td.num{font-family:ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;text-align:right}
 td.up{color:var(--up)}td.down{color:var(--down)}
+.legacy-note{margin:14px 0 0;font-size:12px;color:var(--ink-3);font-style:italic}
 /* controls */
 .controls-row{display:flex;flex-wrap:wrap;gap:9px}
 button.ctl{font:600 13px system-ui,sans-serif;color:var(--ink);background:var(--surface);

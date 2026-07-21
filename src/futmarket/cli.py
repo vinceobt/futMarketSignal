@@ -190,20 +190,29 @@ def cmd_scorecard(args) -> None:
     conn = db.connect(config.database_path)
     source = _resolve_source(conn, args.source, config)
 
-    res = scorecard.score_open_picks(conn, source=source, tax_rate=config.tax_rate)
+    res = scorecard.score_open_picks(conn, source=source, tax_rate=config.tax_rate,
+                                     sell_slippage_pct=config.sell_slippage_pct)
     print(f"scored {res['checked']} open pick(s): {res['target']} hit target, "
           f"{res['stop']} stopped, {res['expired']} expired, "
           f"{res['still_open']} still running\n")
 
-    s = scorecard.summary(conn)
+    from .ml.picks import STRATEGY_VERSION
+    # Judge the current strategy on its own by default; --all blends in legacy picks.
+    strat = None if args.all else STRATEGY_VERSION
+    s = scorecard.summary(conn, strategy=strat)
     if not s.get("graded"):
         print(f"{s.get('total', 0)} pick(s) recorded, {s.get('closed', 0)} resolved, "
               f"none tradeable enough to judge yet.")
         print("Run `futmarket picks --save` daily, and `collect-bulk` regularly "
               "so there are prices to score against.")
+        legacy = scorecard.summary(conn, strategy="legacy")
+        if legacy.get("graded"):
+            print(f"\nlegacy (old engine): {legacy['graded']} graded, "
+                  f"{legacy['return_on_capital_pct']:+.1f}% on capital")
         return
     pnl = s["coins_pnl"]
-    print("TRACK RECORD  (real, tradeable cards only — net of tax)")
+    label = "ALL strategies" if args.all else f"strategy '{STRATEGY_VERSION}'"
+    print(f"TRACK RECORD — {label}  (tradeable cards only, net of tax)")
     print(f"  picks recorded    {s['total']}  ({s['open']} still open)")
     print(f"  graded            {s['graded']}   target {s['hit_target']} · "
           f"stop {s['hit_stop']} · flat {s['expired']}")
@@ -213,6 +222,13 @@ def cmd_scorecard(args) -> None:
     print(f"  total P&L         {pnl:+,} coins   "
           f"({s['avg_coins_per_trade']:+,}/trade)")
     print(f"  median trade      {s['median_return_pct']:+.1f}%")
+
+    if not args.all:
+        legacy = scorecard.summary(conn, strategy="legacy")
+        if legacy.get("graded"):
+            print(f"\n  legacy (old engine): {legacy['graded']} graded, "
+                  f"{legacy['return_on_capital_pct']:+.1f}% on capital  "
+                  f"(excluded above; run --all to include)")
 
     if args.list:
         print("\nrecent picks:")
@@ -635,6 +651,8 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("scorecard",
                        help="score past picks and show the real track record")
     p.add_argument("--source", default=None)
+    p.add_argument("--all", action="store_true",
+                   help="include legacy (old-engine) picks in the headline record")
     p.add_argument("--list", type=int, default=0, metavar="N",
                    help="also list the N most recent picks")
     p.set_defaults(func=cmd_scorecard)

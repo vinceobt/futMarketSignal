@@ -12,6 +12,7 @@ log_path: data/collector.log
 # sell into its resistance. Measured edge lives here — expensive icons are priced
 # efficiently and lose after tax, so max_price excludes them.
 tax_rate: 0.05          # EA transfer-market sell tax (5%)
+sell_slippage_pct: 2.0  # sell a touch under the going rate to actually get filled
 horizon_days: 5         # days a trade is given to work
 min_price: 1000         # ignore near-discard noise
 max_price: 40000        # ignore efficiently-priced cards above this

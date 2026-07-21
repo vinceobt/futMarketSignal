@@ -51,6 +51,7 @@ class Config:
     database_path: Path
     log_path: Path
     tax_rate: float             # EA transfer-market sell tax
+    sell_slippage_pct: float    # selling under the going rate to actually get filled
     horizon_days: int           # how long a trade is given to work
     # The trade, from measured edge: buy a cheap/mid card ON THE DIP (oversold,
     # near its own floor), sell into its resistance. Backtest: cheap+mid fodder
@@ -88,6 +89,7 @@ def load_config(path: str | Path) -> Config:
         database_path=base / raw.get("database_path", "data/market.db"),
         log_path=base / raw.get("log_path", "data/collector.log"),
         tax_rate=float(raw.get("tax_rate", 0.05)),
+        sell_slippage_pct=float(raw.get("sell_slippage_pct", 2.0)),
         horizon_days=int(raw.get("horizon_days", 5)),
         min_price=int(raw.get("min_price", 1000)),
         max_price=int(raw.get("max_price", 40000)),
