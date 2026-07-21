@@ -4,11 +4,9 @@ A read-only view of the model's picks, liquidity coverage, track record, and the
 market rhythms it learned — rendered fresh from the DB on every request. Launch
 with `futmarket dashboard`.
 
-When an access key is configured it gates the page (supplied as `?key=…`, then
-remembered in a cookie), so the dashboard can be exposed on the network safely.
+The page is open (no login): it's read-only and meant for the owner's own
+machine/LAN. It still ships with hardening headers.
 """
-
-import hmac
 
 from . import db, security
 from .config import load_config
@@ -26,14 +24,6 @@ def create_app(config_path, source: str | None = None, access_key: str | None = 
     def _conn():
         return db.connect(config.database_path)
 
-    def _authorized(request: Request) -> bool:
-        # No key configured -> open (localhost dev). Otherwise the key must be
-        # supplied as ?key=… or carried in the cookie set on first load.
-        if not key:
-            return True
-        supplied = request.query_params.get("key") or request.cookies.get("fm_key")
-        return bool(supplied) and hmac.compare_digest(supplied, key)
-
     @app.middleware("http")
     async def add_security_headers(request: Request, call_next):
         response = await call_next(request)
@@ -48,22 +38,14 @@ def create_app(config_path, source: str | None = None, access_key: str | None = 
         return RedirectResponse(url="/ml" + (f"?{q}" if q else ""))
 
     @app.get("/ml")
-    def ml_dashboard(request: Request):
-        if not _authorized(request):
-            return HTMLResponse(
-                "<h1>Unauthorized</h1><p>Append <code>?key=…</code> to the URL.</p>",
-                status_code=401)
+    def ml_dashboard():
+        # Open by design: a read-only dashboard on the owner's own machine/LAN.
         from .ml import dashboard as ml_dash
         conn = _conn()
         try:
-            html = ml_dash.render(conn, source=source or config.source)
+            return HTMLResponse(ml_dash.render(conn, source=source or config.source))
         finally:
             conn.close()
-        resp = HTMLResponse(html)
-        # Remember the key so in-page navigation doesn't need it re-appended.
-        if key and request.query_params.get("key"):
-            resp.set_cookie("fm_key", key, httponly=True, samesite="strict", path="/")
-        return resp
 
     @app.get("/api/health")
     def health():

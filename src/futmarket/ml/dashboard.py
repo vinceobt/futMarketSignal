@@ -219,10 +219,10 @@ def render(conn, *, source: str = "futgg", title: str = "fc26",
     except (TypeError, ValueError):
         fresh = '<span class="chip loss">no price data</span>'
 
-    closed = sc.get("closed", 0)
-    if closed:
-        record = (f'{sc["win_rate"]*100:.0f}%', f'{closed} graded · '
-                  f'{sc["avg_return_pct"]:+.1f}% avg')
+    graded = sc.get("graded", 0)
+    if graded:
+        record = (f'{sc["win_rate"]*100:.0f}%',
+                  f'{graded} graded · {sc["return_on_capital_pct"]:+.1f}% on capital')
     else:
         record = ("—", f'{sc.get("open", 0)} running, none graded yet')
 
@@ -302,7 +302,7 @@ def render(conn, *, source: str = "futgg", title: str = "fc26",
     tax. Patience is the deciding factor: bid near the listed price and it pays; chase at
     market and it doesn't.{
       ' No picks have been graded yet, so there is no track record to lean on.'
-      if not closed else ''}</p>
+      if not graded else ''}</p>
 </section>
 
 <footer><span>fc-market-analytics — page refreshes every 2 minutes</span>
