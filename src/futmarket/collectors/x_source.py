@@ -17,6 +17,7 @@ model of data.
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import time
@@ -70,6 +71,42 @@ def save_session(session_file: str | Path = DEFAULT_SESSION, *,
 
         browser.close()
         raise SourceError("timed out waiting for login — nothing was saved")
+
+
+def build_session_from_cookies(auth_token: str, ct0: str = "",
+                               session_file: str | Path = DEFAULT_SESSION) -> Path:
+    """Build a session file from cookies copied out of a browser you're already
+    logged into.
+
+    This is the reliable path when X blocks the automated login window: you never
+    log in *through* our browser, you just hand it the proof-of-login cookies from
+    a tab where you're already signed in. `auth_token` is the session; `ct0` is
+    the CSRF token X expects alongside it.
+    """
+    auth_token = (auth_token or "").strip()
+    ct0 = (ct0 or "").strip()
+    if not auth_token:
+        raise SourceError(
+            "auth_token is required — in your logged-in X tab open DevTools "
+            "-> Application -> Cookies -> https://x.com and copy the auth_token value")
+
+    expires = time.time() + 365 * 86400          # X refreshes it on use anyway
+    cookies = []
+    # X still sets cookies on both domains; write both so the read works whichever
+    # host a profile URL resolves to.
+    for domain in (".x.com", ".twitter.com"):
+        cookies.append({"name": AUTH_COOKIE, "value": auth_token, "domain": domain,
+                        "path": "/", "expires": expires, "httpOnly": True,
+                        "secure": True, "sameSite": "None"})
+        if ct0:
+            cookies.append({"name": "ct0", "value": ct0, "domain": domain,
+                            "path": "/", "expires": expires, "httpOnly": False,
+                            "secure": True, "sameSite": "Lax"})
+
+    path = Path(session_file)
+    path.write_text(json.dumps({"cookies": cookies, "origins": []}, indent=2))
+    logger.info("wrote X session from pasted cookies to %s", path)
+    return path
 
 
 def _has_session(path: Path) -> bool:

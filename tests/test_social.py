@@ -123,6 +123,28 @@ def test_collect_with_no_matches_writes_nothing(conn):
     assert res["matched"] == 0 and res["cards"] == 0
 
 
+# ---- x session from pasted cookies ----------------------------------------
+
+def test_cookie_session_is_a_valid_storage_state(tmp_path):
+    from futmarket.collectors import x_source
+    path = x_source.build_session_from_cookies(
+        "AUTH123", "CT0456", session_file=tmp_path / "x.json")
+    import json
+    state = json.loads(path.read_text())
+    names = {(c["name"], c["domain"]) for c in state["cookies"]}
+    assert ("auth_token", ".x.com") in names       # the session itself
+    assert ("ct0", ".x.com") in names              # the CSRF token X pairs with it
+    assert state["origins"] == []                  # playwright storage_state shape
+
+
+def test_cookie_session_requires_auth_token(tmp_path):
+    from futmarket.collectors import x_source
+    from futmarket.collectors.base import SourceError
+    with pytest.raises(SourceError) as e:
+        x_source.build_session_from_cookies("  ", session_file=tmp_path / "x.json")
+    assert "auth_token" in str(e.value)
+
+
 # ---- credentials ----------------------------------------------------------
 
 def test_missing_credentials_explain_where_to_get_them(monkeypatch):

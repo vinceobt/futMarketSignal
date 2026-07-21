@@ -183,11 +183,32 @@ def cmd_collect_bulk(args) -> None:
 
 
 def cmd_x_login(args) -> None:
-    """One-off: log in by hand and save the cookies."""
+    """One-off: capture an X session so the reader can use it."""
     from .collectors import x_source
     from .collectors.base import SourceError
+
+    if args.from_cookies:
+        # The reliable path: X blocks logins inside an automated browser, so we
+        # reuse the session from a tab you're already signed into instead.
+        print("Reusing a session you're already logged into — no new window needed.\n")
+        print("In your logged-in X tab:")
+        print("  1. Open DevTools  (Cmd+Option+I)")
+        print("  2. Application tab -> Cookies -> https://x.com")
+        print("  3. Copy these two values:\n")
+        try:
+            auth_token = input("  auth_token: ").strip()
+            ct0 = input("  ct0 (Enter to skip): ").strip()
+            path = x_source.build_session_from_cookies(
+                auth_token, ct0, args.session_file)
+        except SourceError as e:
+            sys.exit(str(e))
+        print(f"\nSaved to {path} (gitignored).")
+        print("Test it:  futmarket social --x --no-reddit --no-youtube")
+        return
+
     print("Use a BURNER X account — automated reading breaks X's terms, and a")
     print("suspension should land on a throwaway, not your real account.\n")
+    print("If the login window gets blocked, use:  futmarket x-login --from-cookies\n")
     try:
         path = x_source.save_session(args.session_file, timeout_s=args.timeout)
     except SourceError as e:
@@ -918,8 +939,11 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=cmd_picks)
 
     p = sub.add_parser("x-login",
-                       help="log in to X once (burner account) and save the session")
+                       help="capture an X session (burner account) for the reader")
     p.add_argument("--session-file", default=".x_session.json")
+    p.add_argument("--from-cookies", action="store_true",
+                   help="paste auth_token/ct0 from a tab you're already logged into "
+                        "(use this if the login window is blocked)")
     p.add_argument("--timeout", type=int, default=300,
                    help="seconds to wait for you to finish logging in")
     p.set_defaults(func=cmd_x_login)
