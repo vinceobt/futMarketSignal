@@ -165,6 +165,148 @@ def _pick_card(row) -> str:
   <div class="foot">{chip}{link}</div></article>'''
 
 
+# ---------------------------------------------------- fragments (fetched by JS)
+
+_VERDICT_CLASS = {"BUY": "buy", "WATCH": "watch", "WAIT": "wait", "AVOID": "avoid"}
+
+
+def _card_tag(row) -> str:
+    rating = row.get("rating")
+    has = rating is not None and rating == rating          # not None, not NaN
+    return (f"{int(rating)} {row.get('version') or ''}".strip() if has
+            else (row.get("version") or ""))
+
+
+def render_card_reads(items) -> str:
+    """Consult results: one block per matched card version, with its verdict."""
+    if not items:
+        return '<p class="empty">No card matched — try the fut.gg spelling.</p>'
+    out = []
+    for row, read in items:
+        v = read["verdict"]
+        vc = _VERDICT_CLASS.get(v, "wait")
+        levels = ""
+        if v == "BUY":
+            levels = (
+                '<dl class="levels">'
+                f'<div><dt>Buy</dt><dd class="buy">~{_fmt(read["price"])}</dd></div>'
+                f'<div><dt>Sell</dt><dd class="sell">{_fmt(read["target"])}</dd></div>'
+                f'<div><dt>Stop</dt><dd class="stop">{_fmt(read["stop"])}</dd></div>'
+                f'<div><dt>R:R</dt><dd>{read["reward_risk"]:g}</dd></div></dl>')
+        reasons = "".join(f"<li>{_esc(r)}</li>" for r in read["reasons"])
+        link = (f'<a class="lnk" href="{_esc(row["url"])}" target="_blank" '
+                f'rel="noopener">fut.gg ↗</a>' if row.get("url") else "")
+        out.append(
+            f'<article class="read {vc}"><header>'
+            f'<div><h3>{_esc(row.get("name"))}</h3>'
+            f'<p class="meta">{_esc(_card_tag(row))} · now {_fmt(read["price"])}</p></div>'
+            f'<span class="verdict {vc}">{v}</span></header>'
+            f'<p class="headline">{_esc(read["headline"])}</p>{levels}'
+            f'<ul class="why">{reasons}</ul>'
+            f'<div class="foot">{link}</div></article>')
+    return "".join(out)
+
+
+def render_group_read(read) -> str:
+    """Consult results for a whole cohort: the group's state + best buys."""
+    if read.get("error"):
+        return f'<p class="empty">{_esc(read["error"])}</p>'
+    move = (f'{read["group_move_7d"]:+.0f}% this week'
+            if read.get("group_move_7d") is not None else "flat / unknown")
+    opps = read.get("opportunities") or []
+    if opps:
+        rows = "".join(
+            f'<li><span class="nm">{_esc(o["name"])} '
+            f'<em>{_esc(o.get("version") or "")}</em></span>'
+            f'<b>{_fmt(o["price"])}</b>'
+            f'<span class="c">{round((o["confidence"] or 0) * 100)}%</span>'
+            + (f'<a class="lnk" href="{_esc(o["url"])}" target="_blank" '
+               f'rel="noopener">↗</a>' if o.get("url") else "")
+            + '</li>' for o in opps)
+        opp_html = f'<ul class="opps">{rows}</ul>'
+    else:
+        opp_html = ('<p class="empty">None on a buyable dip right now — sit tight.</p>')
+    return (f'<div class="group"><p class="glede"><b>{_esc(read["dim"])} '
+            f'{_esc(read["value"])}</b> — {read["n"]} cards · group {move} · '
+            f'{read["share_on_dip"]:.0f}% on a dip now</p>'
+            f'<h4>Best buys in the group</h4>{opp_html}</div>')
+
+
+def render_scorecard_full(sc, graded_rows) -> str:
+    """The honest track record: coin-weighted stats + recent graded trades."""
+    if not sc.get("graded"):
+        return (f'<p class="empty">{sc.get("total", 0)} picks recorded, '
+                f'{sc.get("closed", 0)} resolved — none tradeable enough to grade '
+                f'yet. The record fills in as picks mature.</p>')
+
+    def stat(k, n, s):
+        return f'<div class="stat"><div class="k">{k}</div><div class="n">{n}</div><div class="s">{s}</div></div>'
+
+    stats = (stat("Return on capital", f'{sc["return_on_capital_pct"]:+.1f}%',
+                  "the number that matters")
+             + stat("Win rate", f'{sc["win_rate"]*100:.0f}%', f'{sc["graded"]} graded')
+             + stat("Total P&amp;L", f'{sc["coins_pnl"]:+,}',
+                    f'{sc["avg_coins_per_trade"]:+,}/trade')
+             + stat("Median trade", f'{sc["median_return_pct"]:+.1f}%', "net of tax"))
+
+    rows = ""
+    for g in graded_rows:
+        st = g["status"]
+        chip = "win" if st == "target" else "loss" if st == "stop" else ""
+        pct = g["realized_pct"]
+        pcol = "up" if (pct or 0) >= 0 else "down"
+        rows += (f'<tr><td>{_esc(g["name"] or g["player_id"])}</td>'
+                 f'<td class="num">{_fmt(g["entry_price"])}</td>'
+                 f'<td><span class="chip {chip}">{_esc(st)}</span></td>'
+                 f'<td class="num {pcol}">{pct:+.0f}%</td></tr>')
+    table = (f'<table class="record"><thead><tr><th>Card</th><th>Entry</th>'
+             f'<th>Outcome</th><th>Net</th></tr></thead><tbody>{rows}</tbody></table>'
+             if rows else "")
+    return f'<div class="stats4">{stats}</div>{table}'
+
+
+CONTROLS = [
+    ("collect-bulk", "Refresh prices", "grab the whole market's latest prices"),
+    ("picks", "Run picks", "recompute today's buy list"),
+    ("scorecard", "Grade record", "score any picks the market has answered"),
+    ("insights", "Refresh rhythms", "recompute the weekly/hourly charts"),
+    ("advise-refresh", "Refresh consult", "rescore every card for the consult"),
+    ("train", "Retrain model", "retrain on all data (~10 min)"),
+]
+
+
+def render_controls() -> str:
+    btns = "".join(
+        f'<button class="ctl" data-run="{a}" title="{_esc(desc)}">{_esc(label)}</button>'
+        for a, label, desc in CONTROLS)
+    return (f'<div class="controls-row">{btns}</div>'
+            f'<p id="ctl-status" class="ctl-status">Idle. Actions run one at a '
+            f'time; the page updates when they finish.</p>')
+
+
+def picks_fragment(conn, *, title: str = "fc26", limit: int = 12) -> str:
+    """The picks grid HTML — used by the initial render and the JS refresh."""
+    picks = conn.execute(
+        """SELECT p.*, m.name, m.rating, m.version, m.url FROM pick_log p
+           LEFT JOIN card_meta m ON m.player_id = p.player_id
+           WHERE p.title = ? ORDER BY p.picked_at DESC, p.confidence DESC
+           LIMIT ?""", (title, limit)).fetchall()
+    return ("".join(_pick_card(r) for r in picks) if picks else
+            '<p class="empty">No picks recorded yet — run the picks control.</p>')
+
+
+def record_fragment(conn, *, title: str = "fc26") -> str:
+    """The full track-record HTML — used by the initial render and JS refresh."""
+    sc = scorecard.summary(conn, title=title)
+    graded = conn.execute(
+        """SELECT p.player_id, p.entry_price, p.status, p.realized_pct, m.name
+           FROM pick_log p LEFT JOIN card_meta m ON m.player_id = p.player_id
+           WHERE p.title = ? AND p.status IN ('target','stop','expired')
+             AND p.entry_price >= 1000
+           ORDER BY p.scored_at DESC LIMIT 12""", (title,)).fetchall()
+    return render_scorecard_full(sc, graded)
+
+
 # --------------------------------------------------------------------- render
 
 def render(conn, *, source: str = "futgg", title: str = "fc26",
@@ -196,14 +338,9 @@ def render(conn, *, source: str = "futgg", title: str = "fc26",
         except json.JSONDecodeError:
             metrics = {}
 
-    picks = conn.execute(
-        """SELECT p.*, m.name, m.rating, m.version, m.url FROM pick_log p
-           LEFT JOIN card_meta m ON m.player_id = p.player_id
-           WHERE p.title = ? ORDER BY p.picked_at DESC, p.confidence DESC
-           LIMIT ?""", (title, limit)).fetchall()
-    picks_html = ("".join(_pick_card(r) for r in picks) if picks else
-                  '<p class="empty">No picks recorded yet — run '
-                  '<code>futmarket picks --save</code>.</p>')
+    picks_html = picks_fragment(conn, title=title, limit=limit)
+    record_html = record_fragment(conn, title=title)
+    controls_html = render_controls()
 
     stats = insights.load(conn) or {}
     rhythm_age = stats.get("computed_at", "not computed yet")
@@ -228,15 +365,39 @@ def render(conn, *, source: str = "futgg", title: str = "fc26",
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="120">
 <title>FUT Market Desk — live</title>
 <style>{_CSS}</style></head><body>
 <div class="wrap">
 <header class="top">
   <div><span class="rule"></span><h1>FUT Market Desk</h1>
-    <p>What the model wants to buy, and the market rhythms behind it</p></div>
+    <p>Consult the model, see what it wants to buy, and how it's really doing</p></div>
   <div class="stamp">{fresh}<p class="mono">{now}</p></div>
 </header>
+
+<nav class="tabs">
+  <a href="#consult">Consult</a><a href="#picks">Picks</a>
+  <a href="#record">Track record</a><a href="#rhythms">Rhythms</a>
+  <a href="#controls">Controls</a>
+</nav>
+
+<section id="consult"><h2>Consult the model</h2>
+  <p class="lede">Ask about any card or group — no filters, an honest read on each.
+    Type a name (try <b>Mbappe</b>) or tap a group.</p>
+  <input id="consult-q" class="search" type="search" autocomplete="off"
+    placeholder="Ask about any card…  e.g. Mbappe, Haaland, Saka" aria-label="Consult a card">
+  <div class="chips">
+    <span class="chip-lbl">Groups:</span>
+    <button class="gchip" data-group="rating:83">83s</button>
+    <button class="gchip" data-group="rating:84">84s</button>
+    <button class="gchip" data-group="rating:85">85s</button>
+    <button class="gchip" data-group="rating:86">86s</button>
+    <button class="gchip" data-group="rating:87">87s</button>
+    <button class="gchip" data-group="league:Premier League">Premier League</button>
+    <button class="gchip" data-group="league:LaLiga EA SPORTS">LaLiga</button>
+    <button class="gchip" data-group="position:ST">ST</button>
+    <button class="gchip" data-group="position:GK">GK</button>
+  </div>
+  <div id="consult-out" class="consult-out"></div></section>
 
 <div class="tiles">
   <div class="tile"><div class="k">Open picks</div><div class="n">{sc.get('open',0)}</div>
@@ -252,13 +413,18 @@ def render(conn, *, source: str = "futgg", title: str = "fc26",
     <div class="s">vs {metrics.get('base_rate',0)*100:.0f}% at random</div></div>
 </div>
 
-<section><h2>Picks</h2>
-  <p class="lede">Ranked by the model's confidence. Buy prices are ranges anchored to the
-    live listing — you pay a little over the cheapest to actually get filled. Only cards
-    that genuinely trade are shown.</p>
-  <div class="picks">{picks_html}</div></section>
+<section id="picks"><h2>Picks</h2>
+  <p class="lede">Cheap/mid cards on the dip — oversold, near their own floor, sized to
+    each card. Buy prices are ranges anchored to the live listing. Only cards that
+    genuinely trade are shown.</p>
+  <div id="picks-out" class="picks">{picks_html}</div></section>
 
-<section><h2>The weekly supply cycle</h2>
+<section id="record"><h2>Track record</h2>
+  <p class="lede">The honest, coin-weighted scoreboard — judged only on tradeable cards,
+    net of tax. Return on capital is the number that matters.</p>
+  <div id="record-out">{record_html}</div></section>
+
+<section id="rhythms"><h2>The weekly supply cycle</h2>
   <div class="charts">
     <div class="card"><h3>Average price move by day</h3>
       <p class="sub">Rewards flood the market with cards, then supply dries up. Prices climb
@@ -305,9 +471,14 @@ def render(conn, *, source: str = "futgg", title: str = "fc26",
       if not graded else ''}</p>
 </section>
 
-<footer><span>fc-market-analytics — page refreshes every 2 minutes</span>
+<section id="controls"><h2>Controls</h2>
+  <p class="lede">Run the system from here. Actions run one at a time in the background;
+    picks and the track record refresh automatically when a job finishes.</p>
+  {controls_html}</section>
+
+<footer><span>fc-market-analytics — picks &amp; record refresh live</span>
   <span class="mono">{snaps:,} price records</span></footer>
-</div></body></html>"""
+</div><script src="/app.js"></script></body></html>"""
 
 
 _CSS = """
@@ -404,4 +575,119 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid var(--line);font-si
   color:var(--ink-3);display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
 a:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:3px}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* nav */
+nav.tabs{position:sticky;top:0;z-index:5;display:flex;gap:6px;flex-wrap:wrap;
+  background:color-mix(in srgb,var(--ground) 88%,transparent);backdrop-filter:blur(8px);
+  padding:10px 0;margin:-4px 0 26px;border-bottom:1px solid var(--line)}
+nav.tabs a{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;
+  color:var(--ink-2);text-decoration:none;padding:6px 12px;border-radius:99px;border:1px solid transparent}
+nav.tabs a:hover,nav.tabs a:focus-visible{background:var(--surface);border-color:var(--line);color:var(--ink)}
+/* consult */
+.search{width:100%;font:400 16px/1.4 system-ui,sans-serif;color:var(--ink);
+  background:var(--surface);border:1px solid var(--line);border-radius:12px;
+  padding:14px 16px;box-shadow:var(--shadow);margin-bottom:12px}
+.search:focus{outline:none;border-color:var(--accent)}
+.chips{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-bottom:16px}
+.chip-lbl{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--ink-3);margin-right:2px}
+.gchip{font:500 12.5px system-ui,sans-serif;color:var(--ink-2);background:var(--surface);
+  border:1px solid var(--line);border-radius:99px;padding:6px 13px;cursor:pointer;transition:.12s}
+.gchip:hover,.gchip:focus-visible{border-color:var(--accent);color:var(--ink)}
+.consult-out{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+.consult-out:empty{display:none}
+.read{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px;
+  box-shadow:var(--shadow);border-left:3px solid var(--ink-3)}
+.read.buy{border-left-color:var(--up)}.read.avoid{border-left-color:var(--down)}
+.read.watch,.read.wait{border-left-color:var(--accent)}
+.read header{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:9px}
+.read h3{font-size:16px;font-weight:600}.read .meta{margin:2px 0 0;font-size:12px;color:var(--ink-3)}
+.verdict{font:600 11px system-ui,sans-serif;text-transform:uppercase;letter-spacing:.07em;
+  padding:4px 10px;border-radius:99px;border:1px solid var(--line);white-space:nowrap;flex:none}
+.verdict.buy{color:var(--up);border-color:color-mix(in srgb,var(--up) 40%,transparent);
+  background:color-mix(in srgb,var(--up) 10%,transparent)}
+.verdict.avoid{color:var(--down);border-color:color-mix(in srgb,var(--down) 40%,transparent);
+  background:color-mix(in srgb,var(--down) 10%,transparent)}
+.verdict.watch,.verdict.wait{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,transparent);
+  background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.read .headline{margin:0 0 10px;font-size:13.5px;color:var(--ink-2);line-height:1.45}
+.read .levels{margin:0 0 10px}
+.group{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px;
+  box-shadow:var(--shadow);grid-column:1/-1}
+.glede{margin:0 0 12px;font-size:14px;color:var(--ink-2)}.glede b{color:var(--ink)}
+.group h4{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.09em;color:var(--ink-3)}
+.opps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.opps li{display:flex;align-items:baseline;gap:10px;font-size:13.5px;padding-bottom:6px;
+  border-bottom:1px solid var(--line)}
+.opps li:last-child{border-bottom:0}.opps .nm{flex:1;color:var(--ink)}.opps .nm em{color:var(--ink-3);font-style:normal;font-size:12px}
+.opps b{font-weight:600}.opps .c{color:var(--accent);font-size:12px;font-weight:600}
+/* track record */
+.stats4{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 16px;box-shadow:var(--shadow)}
+.stat .k{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-3)}
+.stat .n{font-family:ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;font-size:24px;font-weight:600;margin-top:5px}
+.stat .s{font-size:12px;color:var(--ink-3);margin-top:2px}
+table.record{width:100%;border-collapse:collapse;font-size:13px}
+table.record th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.08em;
+  color:var(--ink-3);font-weight:600;padding:6px 10px;border-bottom:1px solid var(--line)}
+table.record td{padding:7px 10px;border-bottom:1px solid var(--line)}
+table.record td.num{font-family:ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;text-align:right}
+td.up{color:var(--up)}td.down{color:var(--down)}
+/* controls */
+.controls-row{display:flex;flex-wrap:wrap;gap:9px}
+button.ctl{font:600 13px system-ui,sans-serif;color:var(--ink);background:var(--surface);
+  border:1px solid var(--line);border-radius:10px;padding:10px 15px;cursor:pointer;
+  box-shadow:var(--shadow);transition:.12s}
+button.ctl:hover:not(:disabled),button.ctl:focus-visible{border-color:var(--accent);color:var(--accent)}
+button.ctl:disabled{opacity:.5;cursor:progress}
+.ctl-status{margin:14px 0 0;font-size:13px;color:var(--ink-2);
+  background:var(--raised);border:1px solid var(--line);border-radius:8px;padding:10px 13px}
+"""
+
+
+APP_JS = """'use strict';
+const $ = s => document.querySelector(s);
+async function frag(url, sel){
+  const t = $(sel); if(!t) return;
+  t.innerHTML = '<p class="empty">…</p>';
+  try { const r = await fetch(url); const j = await r.json(); t.innerHTML = j.html || ''; }
+  catch(e){ t.innerHTML = '<p class="empty">could not load — try again</p>'; }
+}
+// consult: search-as-you-type (debounced) + Enter
+const box = $('#consult-q');
+if (box){
+  let tmr;
+  const go = () => { const q = box.value.trim();
+    if(!q){ $('#consult-out').innerHTML=''; return; }
+    frag('/api/advise?q=' + encodeURIComponent(q), '#consult-out'); };
+  box.addEventListener('input', () => { clearTimeout(tmr); tmr = setTimeout(go, 350); });
+  box.addEventListener('keydown', e => { if(e.key==='Enter'){ clearTimeout(tmr); go(); } });
+}
+document.querySelectorAll('[data-group]').forEach(el => el.addEventListener('click', () => {
+  const i = el.dataset.group.indexOf(':');
+  const dim = el.dataset.group.slice(0,i), val = el.dataset.group.slice(i+1);
+  frag('/api/advise/group?dim=' + encodeURIComponent(dim) + '&value=' + encodeURIComponent(val), '#consult-out');
+}));
+// controls
+function refreshLive(){ frag('/api/scorecard', '#record-out'); frag('/api/picks', '#picks-out'); }
+async function poll(id, action, btn){
+  const s = $('#ctl-status');
+  try {
+    const r = await fetch('/api/jobs/' + id); const j = await r.json();
+    s.textContent = action + ': ' + j.status + (j.detail ? (' — ' + j.detail) : '');
+    if (j.status === 'running' || j.status === 'queued'){ setTimeout(() => poll(id, action, btn), 1500); }
+    else { btn.disabled = false; if (j.status === 'done') refreshLive(); }
+  } catch(e){ btn.disabled = false; }
+}
+document.querySelectorAll('[data-run]').forEach(btn => btn.addEventListener('click', async () => {
+  const action = btn.dataset.run, s = $('#ctl-status');
+  btn.disabled = true; s.textContent = 'Starting ' + action + '…';
+  try {
+    const r = await fetch('/api/run/' + action, {method:'POST', headers:{'X-Requested-With':'fetch'}});
+    const j = await r.json();
+    if (j.error){ s.textContent = j.error; btn.disabled = false; return; }
+    poll(j.job_id, action, btn);
+  } catch(e){ s.textContent = 'failed to start'; btn.disabled = false; }
+}));
+// keep picks + record fresh without a full-page reload
+setInterval(refreshLive, 120000);
 """

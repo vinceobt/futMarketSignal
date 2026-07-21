@@ -9,6 +9,19 @@ from __future__ import annotations
 
 import os
 import secrets
+from urllib.parse import urlparse
+
+
+def same_origin(origin: str | None, host_header: str | None) -> bool:
+    """True when a request's Origin matches the host it was sent to. Requests with
+    no Origin (same-origin GETs, curl, server-to-server) are allowed; a *present,
+    mismatched* Origin is the cross-site (CSRF) case we reject on state changes."""
+    if not origin:
+        return True
+    try:
+        return urlparse(origin).netloc == (host_header or "")
+    except ValueError:
+        return False
 
 
 def resolve_key() -> tuple[str, bool]:

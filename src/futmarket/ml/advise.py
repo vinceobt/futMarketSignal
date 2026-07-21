@@ -135,6 +135,8 @@ def find_cards(frame: pd.DataFrame, query: str, *, version: str | None = None,
 
     Most-traded / highest-rated first, so the version people mean surfaces on top.
     """
+    if frame.empty or "name" not in frame.columns:
+        return frame
     q = _norm(query)
     names = frame["name"].fillna("").map(_norm)
     hits = frame[names.str.contains(q, regex=False)].copy()
