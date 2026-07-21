@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The live dashboard, always on and reachable from other devices on the LAN
+     (phone on the same wifi). Reads are open; the action buttons require the
+     access key when the request comes from off the box. Fill __REPO__ and
+     __FUTMARKET_KEY__ (a long random string) before installing to
+     ~/Library/LaunchAgents/ and `launchctl bootstrap`. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.futmarket.dashboard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__REPO__/.venv/bin/futmarket</string>
+    <string>--config</string>
+    <string>__REPO__/config.yaml</string>
+    <string>dashboard</string>
+    <string>--host</string>
+    <string>0.0.0.0</string>
+    <string>--allow-remote</string>
+    <string>--port</string>
+    <string>8899</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FUTMARKET_KEY</key>
+    <string>__FUTMARKET_KEY__</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>__REPO__/data/dashboard.out</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO__/data/dashboard.err</string>
+</dict>
+</plist>

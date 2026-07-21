@@ -63,6 +63,12 @@ prices, records picks, grades the scorecard, refreshes the dashboard, and posts 
 Discord summary. See [scripts/ml_daily.sh](scripts/ml_daily.sh) and
 [deploy/](deploy/) (including `deploy/cloud/` for an always-on server).
 
+**Reach the dashboard from your phone** (same wifi): the dashboard LaunchAgent
+([deploy/com.futmarket.dashboard.plist](deploy/com.futmarket.dashboard.plist))
+binds the LAN, so open `http://<your-mac-ip>:8899/`. Viewing and consulting are
+open; the action buttons need the access key (`?key=…`) from any device but your
+Mac.
+
 ## Layout
 
 ```
