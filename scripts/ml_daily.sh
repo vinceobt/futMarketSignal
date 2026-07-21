@@ -53,4 +53,6 @@ run_step "picks"        "$FUT" picks --limit "$PICKS_LIMIT" \
 run_step "scorecard"    "$FUT" scorecard
 # Rhythms sweep millions of rows, so the dashboard reads them from cache.
 run_step "insights"     "$FUT" insights
+# A short Discord summary so the owner can keep account of every run.
+run_step "notify"       "$FUT" notify
 echo "[$(stamp)] --- ml cycle done ---" >>"$LOG"
