@@ -4,10 +4,11 @@ Two jobs: work out which player a post is talking about, and turn that into
 something the model can use.
 
 Matching is the hard part and it is deliberately conservative. "Sheriff says
-Icons are coming" names no player; "Rodri" matches one; "Rodriguez" matches many
-and is therefore worth nothing. A wrong match is worse than no match — it teaches
-the model that chatter moves a card it never mentioned — so ambiguous surnames
-are dropped rather than guessed at.
+Icons are coming" names no player; "Rodri" matches one. A shared surname is
+resolved by prominence: bare "Messi" means the superstar Lionel, not his obscure
+namesake Rayane, and bare "Simon" — where no one player stands out — is dropped
+rather than smeared across a dozen cards. A wrong match is worse than no match: it
+teaches the model that chatter moved a card it never mentioned.
 
 The output is buzz *volume* per player-day, plus a crude bullish/bearish lean.
 Volume is the real signal: a card being talked about ten times more than usual is
@@ -29,8 +30,11 @@ logger = logging.getLogger(__name__)
 
 # A surname shorter than this matches too much ("Son", "Neto", "Alex").
 MIN_NAME_LEN = 5
-# A surname shared by more than this many distinct players can't identify anyone.
-MAX_PLAYERS_PER_NAME = 3
+# When several players share a surname, attribute it to the top one only if it
+# out-ranks the runner-up by this much on the prominence score (peak rating plus a
+# liquidity nudge). "Messi" clears it (Lionel 97 over Rayane 89); "Simon" doesn't
+# (a crowd of 74–90s with no standout), so it's dropped.
+PROMINENCE_MARGIN = 6.0
 # The leaker/trader accounts worth reading. Leak accounts break promo news early;
 # trading accounts drive hype on specific cards.
 X_CREATORS = ("futSheriff", "FutPoliceLeaks", "Fut_scoreboard", "fifa22_info",
@@ -50,24 +54,52 @@ def _normalise(text: str) -> str:
                    if not unicodedata.combining(c)).lower()
 
 
+def _person(player_id: str) -> str:
+    """The stable player behind a card. fut.gg encodes it as the id's leading
+    segment, so all of Lionel Messi's cards share '158023' while Rayane Messi is
+    '75421' — the right key for 'hype attaches to a person, not a card'."""
+    return player_id.split("-", 1)[0]
+
+
+def _resolve(persons: dict[str, dict]) -> set[str] | None:
+    """Which person(s) a name attributes to, or None to drop it.
+
+    One candidate -> that person. Several -> the prominence leader, but only if it
+    clears the field by PROMINENCE_MARGIN; an evenly-matched crowd names nobody.
+    """
+    if len(persons) == 1:
+        return set(persons)
+    ranked = sorted(persons.values(), key=lambda p: p["prom"], reverse=True)
+    if ranked[0]["prom"] - ranked[1]["prom"] < PROMINENCE_MARGIN:
+        return None                        # no standout — too ambiguous to mean anyone
+    top = max(persons.items(), key=lambda kv: kv[1]["prom"])[0]
+    return {top}
+
+
 def build_name_index(conn, *, title: str = "fc26") -> dict[str, list[str]]:
-    """Searchable name -> the player_ids it could mean.
+    """Searchable name -> the card ids it means.
 
     Hype attaches to a *player*, not one of his seven cards, so every card of a
-    matched player shares the signal.
+    matched player shares the signal. A surname shared by several players is
+    resolved to the prominent one (or dropped) via `_resolve`.
     """
     rows = conn.execute(
-        "SELECT player_id, name FROM card_meta WHERE title=? AND name IS NOT NULL "
-        "AND tradeable=1", (title,)).fetchall()
+        """SELECT m.player_id, m.name, COALESCE(m.rating, 0) AS rating,
+                  COALESCE(l.score, 0) AS liq
+           FROM card_meta m
+           LEFT JOIN liquidity l ON l.player_id = m.player_id AND l.title = m.title
+           WHERE m.title=? AND m.name IS NOT NULL AND m.tradeable=1""",
+        (title,)).fetchall()
 
-    by_name: dict[str, set[str]] = defaultdict(set)
-    distinct_players: dict[str, set[str]] = defaultdict(set)
+    # name -> person -> {"cards": {card_id, ...}, "prom": best-card prominence}
+    by_name: dict[str, dict[str, dict]] = defaultdict(dict)
     for r in rows:
         full = _normalise(r["name"]).strip()
         if not full:
             continue
-        # the base player, so "Joao Felix" counts once however many cards he has
-        base = full
+        pid = _person(r["player_id"])
+        # rating carries fame; liquidity nudges toward the card people actually trade
+        prom = r["rating"] + r["liq"] / 2.0
         keys = {full}
         parts = [p for p in re.split(r"[\s'-]+", full) if p]
         if parts:
@@ -75,25 +107,36 @@ def build_name_index(conn, *, title: str = "fc26") -> dict[str, list[str]]:
         for k in keys:
             if len(k) < MIN_NAME_LEN or k in _STOPWORDS:
                 continue
-            by_name[k].add(r["player_id"])
-            distinct_players[k].add(base)
+            slot = by_name[k].setdefault(pid, {"cards": set(), "prom": 0.0})
+            slot["cards"].add(r["player_id"])
+            slot["prom"] = max(slot["prom"], prom)
 
     index = {}
-    for name, ids in by_name.items():
-        if len(distinct_players[name]) > MAX_PLAYERS_PER_NAME:
-            continue                       # too ambiguous to mean anything
-        index[name] = sorted(ids)
+    for name, persons in by_name.items():
+        chosen = _resolve(persons)
+        if not chosen:
+            continue
+        cards: set[str] = set()
+        for pid in chosen:
+            cards |= persons[pid]["cards"]
+        index[name] = sorted(cards)
     logger.info("name index: %d searchable names", len(index))
     return index
 
 
 def find_mentions(text: str, index: dict[str, list[str]]) -> set[str]:
-    """player_ids mentioned in this text. Whole words only."""
+    """card ids mentioned in this text. Whole words only.
+
+    Longest names first, and a match is blanked out once found, so 'Rayane Messi'
+    is consumed as a whole and doesn't also fire the bare 'Messi' -> Lionel rule.
+    """
     hay = _normalise(text)
     hits: set[str] = set()
-    for name, ids in index.items():
-        if name in hay and re.search(rf"(?<![a-z]){re.escape(name)}(?![a-z])", hay):
-            hits.update(ids)
+    for name in sorted(index, key=len, reverse=True):
+        m = re.search(rf"(?<![a-z]){re.escape(name)}(?![a-z])", hay)
+        if m:
+            hits.update(index[name])
+            hay = f"{hay[:m.start()]}{' ' * (m.end() - m.start())}{hay[m.end():]}"
     return hits
 
 

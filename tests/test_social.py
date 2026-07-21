@@ -57,6 +57,37 @@ def test_ambiguous_surnames_are_dropped(conn):
     assert social.find_mentions("Rodriguez is cheap", idx) == set()
 
 
+def test_shared_surname_resolves_to_the_prominent_player(conn):
+    """Bare 'Messi' means the superstar, not his low-rated namesake."""
+    _card(conn, "158023-lionel-messi-a", "Lionel Messi", rating=97)
+    _card(conn, "158023-lionel-messi-b", "Lionel Messi", rating=91)   # another card
+    _card(conn, "75421-rayane-messi-a", "Rayane Messi", rating=84)
+    conn.commit()
+    idx = social.build_name_index(conn)
+    hits = social.find_mentions("messi is mooning this promo", idx)
+    assert hits == {"158023-lionel-messi-a", "158023-lionel-messi-b"}   # all Lionel's
+    assert "75421-rayane-messi-a" not in hits
+
+
+def test_full_name_does_not_also_fire_the_surname_rule(conn):
+    """A post naming the namesake in full stays on him, not the superstar."""
+    _card(conn, "158023-lionel-messi-a", "Lionel Messi", rating=97)
+    _card(conn, "75421-rayane-messi-a", "Rayane Messi", rating=84)
+    conn.commit()
+    idx = social.build_name_index(conn)
+    assert social.find_mentions("rayane messi looks cheap", idx) == {"75421-rayane-messi-a"}
+
+
+def test_evenly_matched_surname_is_dropped(conn):
+    """Several similar-prominence namesakes name nobody."""
+    _card(conn, "1-simon-a", "Unai Simon", rating=85)
+    _card(conn, "2-simon-b", "Moses Simon", rating=84)
+    _card(conn, "3-simon-c", "Simon Banza", rating=83)
+    conn.commit()
+    idx = social.build_name_index(conn)
+    assert social.find_mentions("simon is trending", idx) == set()
+
+
 def test_short_names_are_ignored(conn):
     _card(conn, "c1", "Heung Min Son")
     conn.commit()
