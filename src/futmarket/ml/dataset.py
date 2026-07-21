@@ -153,6 +153,31 @@ def _liquidity(conn, title: str) -> pd.DataFrame:
                                        "liq_updates_per_day"])
 
 
+def _major_promo(conn, dates, title: str) -> pd.DataFrame:
+    """Per date: days since / until a *major* promo (Icon/Hero/TOTS/TOTY) — the
+    drops that reprice big chunks of the market. Lets the model treat those very
+    differently from a routine promo, which the generic PROMO distance can't."""
+    from . import promos
+    rows = conn.execute(
+        "SELECT start_date, notes, event_type FROM market_events WHERE title=?",
+        (title,)).fetchall()
+    majors = sorted({r["start_date"] for r in rows
+                     if promos.is_major(r["notes"], r["event_type"])})
+    md = pd.to_datetime(pd.Series(majors), errors="coerce").dropna().sort_values().tolist()
+    out = []
+    for d in sorted(set(dates)):
+        dt = pd.to_datetime(str(d), errors="coerce")
+        since = to = np.nan
+        if not pd.isna(dt) and md:
+            past = [x for x in md if x <= dt]
+            future = [x for x in md if x >= dt]
+            since = (dt - past[-1]).days if past else np.nan
+            to = (future[0] - dt).days if future else np.nan
+        out.append({"date": d, "days_since_major_promo": since,
+                    "days_to_major_promo": to})
+    return pd.DataFrame(out)
+
+
 def _sentiment(conn) -> pd.DataFrame:
     """Per (card, day) social buzz: how much it's being talked about and how the
     talk leans. Sparse until weeks of chatter accumulate, so missing days are
@@ -201,6 +226,9 @@ def build_dataset(conn, *, source: str = "futgg", title: str = "fc26",
     for col in ("buzz_mentions", "buzz_sentiment", "buzz_z"):
         frame[col] = frame[col].fillna(0.0)
 
+    # What kind of news is in the air: distance to the big market-moving promos.
+    frame = frame.merge(_major_promo(conn, frame["date"], title), on="date", how="left")
+
     frame = frame.sort_values(["date", "player_id"]).reset_index(drop=True)
     # float64 buys no accuracy for features whose inputs are integer coin prices.
     wide = frame.select_dtypes(include=["float64"]).columns
@@ -230,4 +258,6 @@ FEATURE_COLUMNS = (
     + ["day_of_week", "days_since_card_release", "release_phase"]
     # social buzz (Reddit/YouTube/X) -- sparse today, grows over time
     + ["buzz_mentions", "buzz_sentiment", "buzz_z"]
+    # what kind of news: distance to the big market-moving promos
+    + ["days_since_major_promo", "days_to_major_promo"]
 )

@@ -130,6 +130,21 @@ def _release_svg(curve) -> str:
 
 # ---------------------------------------------------------------------- picks
 
+def _promo_reactions_html(reactions) -> str:
+    if not reactions:
+        return ('<p class="empty">Not enough promo history yet — this fills in as '
+                'the calendar and prices accumulate.</p>')
+    rows = ""
+    for r in reactions:
+        col = "up" if r["avg_move"] >= 0 else "down"
+        rows += (f'<tr><td>{_esc(r["type"])}</td>'
+                 f'<td class="num {col}">{r["avg_move"]:+.2f}%</td>'
+                 f'<td class="num">{r["n"]}</td></tr>')
+    return (f'<table class="record"><thead><tr><th>Promo type</th>'
+            f'<th>Avg daily move</th><th>Days seen</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table>')
+
+
 def _pick_card(row) -> str:
     entry = row["entry_price"] or 0
     band = (f"{_fmt(row['buy_low'])} – {_fmt(row['buy_high'])}"
@@ -499,7 +514,12 @@ def render(conn, *, source: str = "futgg", title: str = "fc26",
     <p class="sub">Promos land on Friday. The card falls hard over its first few days,
       bottoms out around day nine, then recovers. This is why the model is told how old a
       card is, not just what it costs.</p>
-    <div class="plot">{_release_svg(stats.get('release_curve', []))}</div></div></section>
+    <div class="plot">{_release_svg(stats.get('release_curve', []))}</div></div>
+  <div class="card"><h3>How each promo type moves the market</h3>
+    <p class="sub">The model knows <em>when</em> EA drops a promo; this is what each
+      <em>kind</em> does — the average daily move over the days around every event of
+      that type. Icons and Heroes reprice the market differently than a routine SBC.</p>
+    {_promo_reactions_html(stats.get('promo_reactions', []))}</div></section>
 
 <section><h2>Data &amp; model health</h2>
   <div class="two">

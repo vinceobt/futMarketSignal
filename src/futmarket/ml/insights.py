@@ -96,6 +96,39 @@ def _release_curve(conn, source: str, *, days: int = 14) -> list[dict]:
              "n": int(r["n"])} for r in rows]
 
 
+def _promo_reactions(conn, source: str, *, window: int = 3) -> list[dict]:
+    """How each promo *type* moves the market: the average daily move over the few
+    days from each event, grouped by type (Icon, Hero, TOTS, SBC…)."""
+    import datetime as _dt
+    from collections import defaultdict
+
+    from . import promos
+
+    rows = conn.execute(
+        _RETURNS_CTE + f"""
+        SELECT substr(ts, 1, 10) AS d, AVG(ret) AS ar FROM moves
+        WHERE ret IS NOT NULL AND ret BETWEEN -{MAX_MOVE_PCT} AND {MAX_MOVE_PCT}
+        GROUP BY d""", (source,)).fetchall()
+    by_date = {r["d"]: r["ar"] for r in rows}
+
+    acc: dict[str, list[float]] = defaultdict(list)
+    for e in conn.execute("SELECT start_date, notes, event_type FROM market_events"):
+        t = promos.classify(e["notes"], e["event_type"])
+        try:
+            base = _dt.date.fromisoformat((e["start_date"] or "")[:10])
+        except ValueError:
+            continue
+        for k in range(window):
+            v = by_date.get((base + _dt.timedelta(days=k)).isoformat())
+            if v is not None:
+                acc[t].append(v)
+
+    out = [{"type": t, "n": len(vals), "avg_move": round(sum(vals) / len(vals), 3)}
+           for t, vals in acc.items() if len(vals) >= 3]
+    out.sort(key=lambda x: x["avg_move"])
+    return out
+
+
 def compute(conn, *, source: str = "futgg", intraday_since: str = "2026-07-01") -> dict:
     """Recompute every rhythm. Costs a few seconds, not a few minutes."""
     stats = {
@@ -104,6 +137,7 @@ def compute(conn, *, source: str = "futgg", intraday_since: str = "2026-07-01") 
         "weekly": _weekly(conn, source),
         "hourly": _hourly(conn, source, since=intraday_since),
         "release_curve": _release_curve(conn, source),
+        "promo_reactions": _promo_reactions(conn, source),
     }
     logger.info("insights: %d weekday, %d hourly, %d release points",
                 len(stats["weekly"]), len(stats["hourly"]),
