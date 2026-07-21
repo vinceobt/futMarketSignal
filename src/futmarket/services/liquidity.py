@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from .. import db
-from ..features import to_series
+from ..timeseries import to_series
 
 logger = logging.getLogger(__name__)
 

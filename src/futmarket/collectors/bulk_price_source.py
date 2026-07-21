@@ -12,8 +12,8 @@ FUTNext to the coin. That's ~500x cheaper than batching per-card price calls.
 
 The dynamic file's URL carries a rotating content hash that isn't in the page
 HTML (client JS builds it), so we discover both URLs by intercepting the XHRs on
-a fut.gg page load (same patchright trick as momentum_source), then decode in
-pure Python. `decode()` is separated out so the parsing is unit-tested offline.
+a fut.gg page load (a headless patchright browser), then decode in pure Python.
+`decode()` is separated out so the parsing is unit-tested offline.
 """
 
 from __future__ import annotations

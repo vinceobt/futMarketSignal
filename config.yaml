@@ -1,92 +1,14 @@
-# futmarket configuration
-# Everything the collector, scheduler, and (later) signal engine reads lives here.
+# futmarket configuration. All runtime knobs live here, not in code.
 
-source: turnstile_mock
+# What to learn from
+source: futgg           # price series to build features from (fut.gg bulk feed)
+platform: console       # console | pc
 
-# Console market (PS + Xbox share one market since FC25). "pc" is the other option.
-platform: console
-
-poll_minutes: 45
-
-# Seconds of random extra delay between per-player fetches within a pass.
-inter_player_delay_seconds: [3, 6]
-
-# A pass skips a player whose latest snapshot is younger than
-# poll_minutes * skip_guard_fraction (makes restarts idempotent).
-skip_guard_fraction: 0.5
-
-# Circuit breaker: after this many consecutive source failures, pause the
-# source for cooldown_minutes instead of hammering it.
-max_consecutive_failures: 3
-cooldown_minutes: 60
-
-# Identify yourself honestly on any future HTTP source. Put a contact in it.
-user_agent: "fc-market-analytics/0.1 (personal price tracker; contact: set-me-in-config)"
-
-# Hard cap enforced by config validation.
-max_watchlist_size: 50
-
+# Where data lives (relative to this file)
 database_path: data/market.db
 log_path: data/collector.log
 
-# Tax used everywhere P&L is computed (targets, margins, backtests).
-signals:
-  tax_rate: 0.05        # EA transfer-market sell tax
-
-# The unified decision engine — one decide() shared by the advisor, the
-# discovery scanner, and the backtester. It outputs BUY / SELL / SKIP with the
-# failed gates named. Backtest it (`futmarket backtest`) before trusting alerts.
-strategy:
-  window_days: 30           # how much history defines the floor + counts bounces
-  min_bounces: 3            # completed rebounds in the window to call a card a reliable bouncer
-  buy_zone_pct: 3           # "near the floor" = current price within this % of the floor
-  sell_mode: either         # "target" = fixed % profit; "resistance" = ride to the ceiling;
-                            # "either" = whichever triggers first (stop applies in every mode)
-  target_pct: 25            # SELL when up this % net of the 5% tax vs the buy price
-  resistance_pctile: 80     # the ceiling = this duration-weighted percentile of the range
-  stop_pct: 8               # SELL (bail) if price falls this % below the floor; 0 = no stop
-  floor_pctile: 15          # the floor = this duration-weighted percentile of the range
-  floor_drift_pct: 10       # reject as a downtrend if dip-lows trend down >this% per window
-                            # (Theil–Sen fit over dip lows — one outlier can't fake a trend)
-  touch_tol_pct: 3          # a floor "touch" = price within this % of the floor
-  min_touches: 3            # distinct touches needed to call the support validated
-  z_buy: 0.5                # BUY needs robust z <= -this (duration-weighted median/MAD).
-                            # Deliberately gentler than the floor gate: at the 15th-pctile
-                            # floor z is already ~-0.9 on a uniform range; a bigger z_buy
-                            # double-gates the same condition and starves entries.
-  cv_max: 0.60              # SKIP if the robust coefficient of variation exceeds this.
-                            # A chaos rail, not a tight filter: a healthy wide-range
-                            # rebounder runs CV 0.4-0.6 (its range IS dispersion);
-                            # touches/bounces/drift do the structure filtering.
-  min_margin_pct: 8         # SKIP if floor→ceiling nets less than this % after the 5% tax
-  min_points: 10            # SKIP with fewer weighted samples in the window
-  min_span_hours: 168       # SKIP with less than this much wall-clock history (7 days)
-  max_stale_hours: 48       # SKIP if the newest price is older than this
-  exit_band_pct: 2          # resistance exit fires within this % below the ceiling
-  event_guard_days: 2       # SKIP a BUY if a crashing event (SBC/PROMO/TOTW) is this close
-  max_gap_hours: 48         # cap on one sample's time-weight (long stale plateaus)
-  momentum_screen_limit: 8  # also screen this many fut.gg momentum movers/cycle; 0 = watchlist only
-
-# Backtest promotion: besides beating every baseline's total return, the
-# candidate's max drawdown may be at most this multiple of the worst baseline's.
-backtest:
-  max_dd_multiple: 1.0
-
-# Where signals go. destination: console (default) or discord.
-# For discord, paste an incoming-webhook URL — sending publishes externally, so
-# it stays console until you set this deliberately.
-alerts:
-  destination: discord
-  webhook_url: REDACTED
-  min_confidence: 0.6   # realtime mode only pushes signals at/above this confidence
-
-# Watchlist: just paste the fut.gg player URL for each card you want to track.
-# Open the player on https://www.fut.gg, copy the address bar, and add it here.
-# The app derives a stable id + display name from the URL, and fills in the
-# rating/version by reading the page. Edit freely; cap is 50.
-#
-# Left empty on purpose: this build runs on momentum auto-discovery — the 6h
-# scanner tracks range-bound fut.gg movers automatically, so no manual list is
-# needed. Add URLs here only if you want to force-track specific cards.
-watchlist: []
-
+# Trade economics the model labels against
+tax_rate: 0.05          # EA transfer-market sell tax (5%)
+target_pct: 25.0        # profit target for the triple-barrier labels
+stop_pct: 8.0           # stop-loss for the triple-barrier labels
