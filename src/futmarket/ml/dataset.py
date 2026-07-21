@@ -153,6 +153,21 @@ def _liquidity(conn, title: str) -> pd.DataFrame:
                                        "liq_updates_per_day"])
 
 
+def _sentiment(conn) -> pd.DataFrame:
+    """Per (card, day) social buzz: how much it's being talked about and how the
+    talk leans. Sparse until weeks of chatter accumulate, so missing days are
+    simply 'no buzz' (0) — the model learns from it as the history fills in."""
+    rows = conn.execute(
+        """SELECT player_id, substr(timestamp, 1, 10) AS date,
+                  SUM(mention_count) AS buzz_mentions,
+                  AVG(sentiment) AS buzz_sentiment,
+                  MAX(COALESCE(buzz_z, 0)) AS buzz_z
+           FROM sentiment_signals GROUP BY player_id, substr(timestamp, 1, 10)"""
+    ).fetchall()
+    return pd.DataFrame(rows, columns=["player_id", "date", "buzz_mentions",
+                                       "buzz_sentiment", "buzz_z"])
+
+
 def _lifecycle_frame(conn, dates, title: str) -> pd.DataFrame:
     life = lifecycle.load(conn, title=title)
     return pd.DataFrame([{"date": d, **life.features(d)} for d in sorted(set(dates))])
@@ -178,6 +193,13 @@ def build_dataset(conn, *, source: str = "futgg", title: str = "fc26",
     frame = frame.merge(_lifecycle_frame(conn, frame["date"], title),
                         on="date", how="left")
     frame = frame.merge(_liquidity(conn, title), on="player_id", how="left")
+
+    # Social buzz (Reddit/YouTube/X). Sparse today; a left-join + fill means "no
+    # buzz" is 0 and the model starts learning the signal as chatter accumulates.
+    buzz = _sentiment(conn)
+    frame = frame.merge(buzz, on=["player_id", "date"], how="left")
+    for col in ("buzz_mentions", "buzz_sentiment", "buzz_z"):
+        frame[col] = frame[col].fillna(0.0)
 
     frame = frame.sort_values(["date", "player_id"]).reset_index(drop=True)
     # float64 buys no accuracy for features whose inputs are integer coin prices.
@@ -206,4 +228,6 @@ FEATURE_COLUMNS = (
        "is_weekend_window", "rating", "liq_score", "liq_updates_per_day"]
     # the weekly rhythm and the release curve -- see add_behaviour_features
     + ["day_of_week", "days_since_card_release", "release_phase"]
+    # social buzz (Reddit/YouTube/X) -- sparse today, grows over time
+    + ["buzz_mentions", "buzz_sentiment", "buzz_z"]
 )
