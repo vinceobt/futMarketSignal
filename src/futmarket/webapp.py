@@ -126,6 +126,15 @@ def create_app(config_path, source: str | None = None, access_key: str | None = 
         finally:
             conn.close()
 
+    @app.get("/api/holding")
+    def api_holding():
+        from .ml import dashboard as ml_dash
+        conn = _conn()
+        try:
+            return {"html": ml_dash.holding_fragment(conn, source=source or config.source)}
+        finally:
+            conn.close()
+
     # ---- controls (actions run code, so guarded) ----
     @app.post("/api/run/{action}")
     def api_run(action: str, request: Request):

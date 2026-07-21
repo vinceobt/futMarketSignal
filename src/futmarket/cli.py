@@ -183,6 +183,23 @@ def cmd_notify(args) -> None:
         print("could not send Discord notification (see log)")
 
 
+def cmd_sell_alerts(args) -> None:
+    """Ping Discord to sell held picks that reached their target (or hit stop)."""
+    from . import secrets
+    from .services import notify
+    config = _load(args)
+    setup_logging(config.log_path)
+    webhook = secrets.get("DISCORD_WEBHOOK_URL")
+    if not webhook:
+        print("no DISCORD_WEBHOOK_URL set (add it to .env) — skipping sell alerts")
+        return
+    conn = db.connect(config.database_path)
+    source = _resolve_source(conn, args.source, config)
+    n = notify.sell_alerts(conn, webhook, source=source, tax_rate=config.tax_rate,
+                           sell_slippage_pct=config.sell_slippage_pct)
+    print(f"sent {n} sell alert(s)")
+
+
 def cmd_scorecard(args) -> None:
     from .services import scorecard
     config = _load(args)
@@ -660,6 +677,11 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("notify",
                        help="post a short run summary to Discord (needs DISCORD_WEBHOOK_URL)")
     p.set_defaults(func=cmd_notify)
+
+    p = sub.add_parser("sell-alerts",
+                       help="ping Discord to sell held picks that hit target/stop")
+    p.add_argument("--source", default=None)
+    p.set_defaults(func=cmd_sell_alerts)
 
     p = sub.add_parser("sale-stats",
                        help="fetch what cards REALLY sold for (true price band + trade rate)")

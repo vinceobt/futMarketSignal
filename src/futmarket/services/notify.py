@@ -8,13 +8,59 @@ Sending publishes externally, so it only fires when a webhook is configured.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .. import db
 from ..alerts import _card_tag, _coins
 from . import scorecard
 
 logger = logging.getLogger(__name__)
+
+# Alert when the live price is within this fraction of the target — a touch early,
+# so you have time to actually list and sell into the bounce.
+NEAR_TARGET = 0.98
+
+
+def sell_alerts(conn, webhook_url: str, *, source: str = "futgg", title: str = "fc26",
+                tax_rate: float = 0.05, sell_slippage_pct: float = 0.0) -> int:
+    """Ping Discord to SELL a held pick that has reached its target, or CUT one that
+    hit its stop. Each pick alerts once (recorded via ``alerted_at``)."""
+    from ..alerts import DiscordAlerter
+    from ..ml.picks import STRATEGY_VERSION
+    alerter = DiscordAlerter(webhook_url)
+    now = datetime.now(timezone.utc)
+    sale_net = (1 - tax_rate) * (1 - sell_slippage_pct / 100.0)
+    sent = 0
+    for pick in db.open_picks(conn, title=title):
+        # only alert on the current strategy's real positions, not old paper picks
+        if pick["strategy"] != STRATEGY_VERSION or pick["alerted_at"]:
+            continue
+        price = db.latest_price(conn, pick["player_id"], source)
+        if price is None:
+            continue
+        target, stop = pick["target_price"], pick["stop_price"]
+        if price >= target * NEAR_TARGET:
+            kind, emoji, why = "SELL", "🟢", "hit its target"
+        elif price <= stop:
+            kind, emoji, why = "CUT", "🔴", "hit its stop"
+        else:
+            continue
+        meta = db.card_meta_get(conn, pick["player_id"])
+        name = meta["name"] if meta else pick["player_id"]
+        tag = _card_tag(meta["rating"] if meta else None,
+                        meta["version"] if meta else None)
+        net = (price * sale_net / pick["entry_price"] - 1) * 100
+        url = f"\n<{meta['url']}>" if meta and meta["url"] else ""
+        msg = (f"{emoji} **{kind} {name}**{tag} now ~{_coins(price)} · "
+               f"{net:+.0f}% net — {why}{url}")
+        try:
+            alerter.send(msg)
+            db.mark_pick_alerted(conn, pick["id"], now)
+            sent += 1
+        except Exception as e:  # noqa: BLE001 - a failed send must not stop the rest
+            logger.warning("sell alert failed for %s: %s", pick["player_id"], e)
+    logger.info("sell alerts: %d sent", sent)
+    return sent
 
 
 def build_run_summary(conn, *, title: str = "fc26", top: int = 6) -> str:

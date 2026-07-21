@@ -76,6 +76,11 @@ def test_scorecard_and_picks_fragments(client):
     assert client.get("/api/picks").status_code == 200
 
 
+def test_holding_fragment_empty_and_endpoint(client):
+    r = client.get("/api/holding")
+    assert r.status_code == 200 and "No open positions" in r.json()["html"]
+
+
 def test_advise_on_empty_db_is_graceful(client):
     r = client.get("/api/advise", params={"q": "mbappe"})
     assert r.status_code == 200 and "No card matched" in r.json()["html"]

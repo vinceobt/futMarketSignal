@@ -293,6 +293,43 @@ def render_controls() -> str:
             f'time; the page updates when they finish.</p>')
 
 
+def holding_fragment(conn, *, source: str = "futgg", title: str = "fc26") -> str:
+    """Open positions from the current strategy: where each sits vs its target,
+    and a SELL flag when it's there. Derived live from pick_log + latest prices."""
+    from ..services.notify import NEAR_TARGET
+    from .picks import STRATEGY_VERSION
+    picks = [p for p in db.open_picks(conn, title=title)
+             if p["strategy"] == STRATEGY_VERSION]
+    if not picks:
+        return ('<p class="empty">No open positions from the current strategy. '
+                'Picks you save appear here until they hit target or stop.</p>')
+    rows = ""
+    for p in picks:
+        meta = db.card_meta_get(conn, p["player_id"])
+        name = _esc(meta["name"] if meta else p["player_id"])
+        price = db.latest_price(conn, p["player_id"], source)
+        entry, target, stop = p["entry_price"], p["target_price"], p["stop_price"]
+        if price is None:
+            flag, fc, nowcol, to_tgt = "—", "", "", "—"
+        else:
+            net = (price * 0.95 / entry - 1) * 100
+            nowcol = f'<span class="{"up" if net >= 0 else "down"}">{net:+.0f}%</span>'
+            to_tgt = f"{(target / price - 1) * 100:+.0f}%"
+            if price >= target * NEAR_TARGET:
+                flag, fc = "SELL", "win"
+            elif price <= stop:
+                flag, fc = "CUT", "loss"
+            else:
+                flag, fc = "hold", ""
+        rows += (f'<tr><td>{name}</td><td class="num">{_fmt(entry)}</td>'
+                 f'<td class="num">{_fmt(price)}</td><td class="num">{nowcol}</td>'
+                 f'<td class="num">{to_tgt}</td>'
+                 f'<td><span class="chip {fc}">{flag}</span></td></tr>')
+    return (f'<table class="record"><thead><tr><th>Card</th><th>Bought</th>'
+            f'<th>Now</th><th>P&amp;L</th><th>To target</th><th></th>'
+            f'</tr></thead><tbody>{rows}</tbody></table>')
+
+
 def picks_fragment(conn, *, title: str = "fc26", limit: int = 12) -> str:
     """The picks grid HTML — used by the initial render and the JS refresh."""
     picks = conn.execute(
@@ -352,6 +389,7 @@ def render(conn, *, source: str = "futgg", title: str = "fc26",
             metrics = {}
 
     picks_html = picks_fragment(conn, title=title, limit=limit)
+    holding_html = holding_fragment(conn, source=source, title=title)
     record_html = record_fragment(conn, title=title)
     controls_html = render_controls()
 
@@ -389,8 +427,8 @@ def render(conn, *, source: str = "futgg", title: str = "fc26",
 
 <nav class="tabs">
   <a href="#consult">Consult</a><a href="#picks">Picks</a>
-  <a href="#record">Track record</a><a href="#rhythms">Rhythms</a>
-  <a href="#controls">Controls</a>
+  <a href="#holding">Holding</a><a href="#record">Track record</a>
+  <a href="#rhythms">Rhythms</a><a href="#controls">Controls</a>
 </nav>
 
 <section id="consult"><h2>Consult the model</h2>
@@ -431,6 +469,11 @@ def render(conn, *, source: str = "futgg", title: str = "fc26",
     each card. Buy prices are ranges anchored to the live listing. Only cards that
     genuinely trade are shown.</p>
   <div id="picks-out" class="picks">{picks_html}</div></section>
+
+<section id="holding"><h2>Holding</h2>
+  <p class="lede">Open positions from the current strategy — where each sits versus its
+    target right now. <b>SELL</b> means it's reached target; you get a Discord ping too.</p>
+  <div id="holding-out">{holding_html}</div></section>
 
 <section id="record"><h2>Track record</h2>
   <p class="lede">The honest, coin-weighted scoreboard — judged only on tradeable cards,
@@ -682,7 +725,7 @@ document.querySelectorAll('[data-group]').forEach(el => el.addEventListener('cli
   frag('/api/advise/group?dim=' + encodeURIComponent(dim) + '&value=' + encodeURIComponent(val), '#consult-out');
 }));
 // controls
-function refreshLive(){ frag('/api/scorecard', '#record-out'); frag('/api/picks', '#picks-out'); }
+function refreshLive(){ frag('/api/scorecard', '#record-out'); frag('/api/picks', '#picks-out'); frag('/api/holding', '#holding-out'); }
 async function poll(id, action, btn){
   const s = $('#ctl-status');
   try {

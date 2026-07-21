@@ -50,6 +50,8 @@ echo "[$(stamp)] --- ml cycle start ---" >>"$LOG"
 run_step "collect-bulk" "$FUT" collect-bulk
 run_step "picks"        "$FUT" picks --limit "$PICKS_LIMIT" \
                                      --min-sales-per-hour "$MIN_SALES" --save
+# Sell side: ping to sell any held pick that reached its target before grading it.
+run_step "sell-alerts"  "$FUT" sell-alerts
 run_step "scorecard"    "$FUT" scorecard
 # Rhythms sweep millions of rows, so the dashboard reads them from cache.
 run_step "insights"     "$FUT" insights

@@ -266,6 +266,7 @@ CREATE TABLE IF NOT EXISTS pick_log (
   scored_at      DATETIME,
   realized_pct   REAL,
   strategy       TEXT NOT NULL DEFAULT 'legacy', -- which strategy made this pick
+  alerted_at     DATETIME,                       -- when a "sell now" alert was sent
   UNIQUE(player_id, picked_at)
 );
 CREATE INDEX IF NOT EXISTS idx_pick_log_status ON pick_log(status, picked_at);
@@ -321,6 +322,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # used 7. Tag the already-saved dip picks correctly so the first batch isn't
         # blended into legacy.
         conn.execute("UPDATE pick_log SET strategy='dip_v1' WHERE horizon_days=5")
+    # When a "sell now" alert was sent for a held pick, so it only fires once.
+    if "alerted_at" not in _column_names(conn, "pick_log"):
+        conn.execute("ALTER TABLE pick_log ADD COLUMN alerted_at DATETIME")
     conn.commit()
 
 
@@ -846,6 +850,22 @@ def open_picks(conn: sqlite3.Connection, *, title: str = "fc26") -> list[sqlite3
     return conn.execute(
         "SELECT * FROM pick_log WHERE status='open' AND title=? ORDER BY picked_at",
         (title,)).fetchall()
+
+
+def latest_price(conn: sqlite3.Connection, player_id: str,
+                 source: str = "futgg") -> int | None:
+    """The most recent live price for a card, or None if never seen."""
+    row = conn.execute(
+        "SELECT price FROM price_snapshots WHERE player_id=? AND source=? AND price>0 "
+        "ORDER BY timestamp DESC LIMIT 1", (player_id, source)).fetchone()
+    return int(row["price"]) if row else None
+
+
+def mark_pick_alerted(conn: sqlite3.Connection, pick_id: int,
+                      at: datetime | None = None) -> None:
+    conn.execute("UPDATE pick_log SET alerted_at=? WHERE id=?",
+                 (bucket_timestamp(at or datetime.now(timezone.utc)), pick_id))
+    conn.commit()
 
 
 def close_pick(conn: sqlite3.Connection, pick_id: int, *, status: str,
