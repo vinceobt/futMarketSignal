@@ -128,14 +128,19 @@ not by tests.
 ## 5. Architecture
 
 ```
-collectors/          raw data in
-  card_list_source     full card registry (plain httpx)
-  bulk_price_source    whole market's prices in 2 requests (decoded CDN files)
+collectors/          raw data in (all plain httpx unless noted)
+  card_list_source     full card registry
+  bulk_price_source    whole market's prices in one pass (decoded CDN files, patchright)
   history_source       per-card daily history + real completed sales
   sbc_source           SBC windows
   ea_news_source       EA announcements
+  social_sources       Reddit + YouTube buzz
+  x_source             X/Twitter leaker feed (saved session)
 services/            orchestration
   registry, backfill, bulk_collect, sales, liquidity, calendar
+  scorecard    grades past picks -> the honest track record
+  social       matches chatter to cards (prominence-resolved surnames)
+  notify       posts a run summary to Discord
 ml/                  the brain
   dataset      one row per (card, day): card + cohort + lifecycle + behaviour
   cohorts      groups (rating/position/league/nation/version/band) + relative strength
@@ -143,8 +148,13 @@ ml/                  the brain
   labels       forward returns + triple-barrier (tax-adjusted)
   validation   walk-forward splits WITH EMBARGO (never random k-fold)
   train        two heads, gated against a dumb baseline
-  picks        the user-facing output
-  race         model vs baselines (deprioritised — owner doesn't want comparisons)
+  picks        the user-facing recommendations
+  insights     cached market rhythms the dashboard reads
+  dashboard    the live /ml web page (server-rendered, read-only)
+top-level: cli, config, db, timeseries, secrets, security, alerts, webapp
+
+The old rules-based engine (strategy/backtest/features/signals/advisor/scanner
+and their collectors) was removed — this is an ML-only codebase now.
 ```
 
 **Leakage discipline:** every rolling stat is shifted a day; a test asserts that
@@ -156,6 +166,7 @@ truncating the future leaves past features unchanged. Keep it that way.
 
 ```bash
 futmarket picks --min-sales-per-hour 5     # ← the product. what to buy, and why
+futmarket scorecard                        # how past picks have actually done
 futmarket train                            # retrain (~15 min on full data)
 futmarket build-dataset                    # inspect the feature matrix
 futmarket sale-stats --limit 500           # refresh real sold prices
@@ -164,7 +175,14 @@ futmarket collect-bulk                     # whole-market price snapshot (4 seco
 futmarket backfill-history --order oldest   # deep history, oldest cards first
 futmarket score-liquidity                  # recompute tradeability
 futmarket build-calendar                   # promos/SBCs/EA news
+futmarket social [--x]                     # collect Reddit/YouTube/X buzz
+futmarket insights                         # refresh the dashboard's market rhythms
+futmarket notify                           # post a run summary to Discord
+futmarket dashboard --port 8899            # the live web dashboard (open /ml)
 ```
+
+The 24/7 loop (`scripts/ml_daily.sh`, run by the `com.futmarket.ml` LaunchAgent)
+chains: collect-bulk → picks --save → scorecard → insights → notify.
 
 Environment: `uv`-managed venv, run via `.venv/bin/python -m futmarket.cli …`.
 There is no `pip` in the venv — use `uv pip install`.

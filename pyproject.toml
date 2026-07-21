@@ -1,13 +1,11 @@
 [project]
 name = "futmarket"
 version = "0.1.0"
-description = "FUT market intelligence: decision-support price tracking and signals for EA FC Ultimate Team. Never trades, never touches EA credentials."
+description = "A self-improving ML system for EA FC Ultimate Team: learns how cards behave and recommends what to buy and sell. Never trades, never touches EA credentials."
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
-    "beautifulsoup4>=4.12",
     "PyYAML>=6.0",
-    "APScheduler>=3.10",
     "pandas>=2.0",
     "patchright",
     "camoufox[geoip]",
@@ -30,9 +28,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-futmarket = ["web/*.html", "web/*.css", "web/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
