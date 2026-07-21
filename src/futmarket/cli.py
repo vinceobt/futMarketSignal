@@ -271,6 +271,69 @@ def cmd_picks(args) -> None:
         print(f"recorded {n} picks for later scoring")
 
 
+def _print_card_read(row, read) -> None:
+    import pandas as pd
+    tag = f"{int(row['rating'])} {row.get('version') or ''}".strip() if pd.notna(
+        row.get("rating")) else (row.get("version") or "")
+    print(f"■ {row['name']}  ({tag})   now {read['price']:,}")
+    print(f"  {read['verdict']}: {read['headline']}")
+    if read["verdict"] == "BUY":
+        print(f"     sell ~{read['target']:,}   stop {read['stop']:,}   "
+              f"(reward:risk {read['reward_risk']:g})")
+    for r in read["reasons"]:
+        print(f"       - {r}")
+    if row.get("url"):
+        print(f"     {row['url']}")
+    print()
+
+
+def cmd_advise(args) -> None:
+    """Consult the model about a specific card or a whole group."""
+    import pandas as pd
+    from .ml import advise
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    source = _resolve_source(conn, args.source, config)
+    try:
+        frame = advise.get_scored(conn, source=source, rebuild=args.refresh)
+    except RuntimeError as e:
+        sys.exit(str(e))
+    if frame.empty:
+        sys.exit("no data yet — run `futmarket backfill-history` and `train` first")
+
+    # group mode: --rating / --league / --position / --nation
+    for dim, val in (("rating", args.rating), ("league", args.league),
+                     ("position", args.position), ("nation", args.nation)):
+        if val is not None:
+            r = advise.cohort_read(frame, dim=dim, value=val, tax_rate=config.tax_rate)
+            if "error" in r:
+                sys.exit(r["error"])
+            move = (f"{r['group_move_7d']:+.0f}% this week"
+                    if r["group_move_7d"] is not None else "flat/unknown")
+            print(f"\n{dim} {val}: {r['n']} cards · group {move} · "
+                  f"{r['share_on_dip']:.0f}% are on a dip right now")
+            if r["opportunities"]:
+                print("\nbest buys in the group right now:")
+                for o in r["opportunities"]:
+                    print(f"  • {o['name']} ({o.get('version') or ''}) "
+                          f"@ {o['price']:,} — {o['confidence']:.0%} confident"
+                          + (f"  {o['url']}" if o.get("url") else ""))
+            else:
+                print("\nnone of them are on a buyable dip right now — sit tight.")
+            return
+
+    if not args.query:
+        sys.exit("name a card (e.g. `futmarket advise mbappe`) or a group "
+                 "(e.g. `futmarket advise --rating 84`)")
+    matches = advise.find_cards(frame, args.query, version=args.version)
+    if matches.empty:
+        sys.exit(f"no card matching {args.query!r} — try the fut.gg spelling")
+    print(f"\nAsked about {args.query!r} — {len(matches)} card(s):\n")
+    for _, row in matches.iterrows():
+        _print_card_read(row, advise.card_read(row, tax_rate=config.tax_rate))
+
+
 def cmd_sale_stats(args) -> None:
     from .services import sales
     config = _load(args)
@@ -528,6 +591,21 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--save", action="store_true",
                    help="record these picks so they can be scored later")
     p.set_defaults(func=cmd_picks)
+
+    p = sub.add_parser("advise",
+                       help="consult the model about a card (e.g. `advise mbappe`) "
+                            "or a group (e.g. `advise --rating 84`)")
+    p.add_argument("query", nargs="?", default=None, help="card name to ask about")
+    p.add_argument("--version", default=None,
+                   help="narrow to a card version, e.g. 'gold', 'TOTW'")
+    p.add_argument("--rating", default=None, help="ask about a rating band, e.g. 84")
+    p.add_argument("--league", default=None, help="ask about a league")
+    p.add_argument("--position", default=None, help="ask about a position, e.g. ST")
+    p.add_argument("--nation", default=None, help="ask about a nation")
+    p.add_argument("--source", default=None)
+    p.add_argument("--refresh", action="store_true",
+                   help="rebuild the scored cache instead of using it")
+    p.set_defaults(func=cmd_advise)
 
     p = sub.add_parser("x-login",
                        help="capture an X session (burner account) for the reader")
