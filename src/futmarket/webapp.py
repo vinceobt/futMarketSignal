@@ -31,7 +31,7 @@ def _default_source(conn, config) -> str:
 
 def create_app(config_path, source: str | None = None, access_key: str | None = None):
     from fastapi import Body, FastAPI, HTTPException, Request
-    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
     from fastapi.staticfiles import StaticFiles
 
     config_path = str(config_path)
@@ -79,7 +79,14 @@ def create_app(config_path, source: str | None = None, access_key: str | None = 
             return "0"
 
     @app.get("/")
-    def index():
+    def index(request: Request):
+        # The live ML dashboard is the product now, so the root points there.
+        # The old rules-engine dashboard is still reachable at /legacy.
+        q = request.url.query
+        return RedirectResponse(url="/ml" + (f"?{q}" if q else ""))
+
+    @app.get("/legacy")
+    def legacy_index():
         html = (WEB / "index.html").read_text()
         for asset in ("app.css", "app.js", "boot.js"):
             html = html.replace(f"/static/{asset}",
