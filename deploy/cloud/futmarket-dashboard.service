@@ -1,0 +1,17 @@
+[Unit]
+Description=futmarket live dashboard (always on)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/futmarket
+# FUTMARKET_KEY is written by bootstrap.sh into this file — it's the access key
+# that protects the publicly-bound dashboard.
+EnvironmentFile=/opt/futmarket/data/.dashboard_env
+ExecStart=/opt/futmarket/.venv/bin/futmarket dashboard --host 0.0.0.0 --port 8899 --allow-remote
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=futmarket ML cycle (prices, picks, scorecard, insights)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/futmarket
+ExecStart=/opt/futmarket/deploy/cloud/ml_cycle.sh
+# The browser-based collector can be slow under a challenge; give it room.
+TimeoutStartSec=1800
