@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 MODEL_DIR = Path("data/models")
 QUANTILES = (0.1, 0.5, 0.9)
 LIQUID_TIERS = ("A", "B")
-DEFAULT_HORIZON = 7
+DEFAULT_HORIZON = 5
 MIN_TRAIN_ROWS = 200
 
 
@@ -173,9 +173,10 @@ def _liquid_only(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def train(conn, *, source: str = "futgg", title: str = "fc26",
-          horizon: int = DEFAULT_HORIZON, target_pct: float = 25.0,
-          stop_pct: float = 8.0, tax_rate: float = 0.05, n_splits: int = 4,
-          model_dir: Path | None = None, frame: pd.DataFrame | None = None) -> dict:
+          horizon: int = DEFAULT_HORIZON, stop_buffer_pct: float = 2.0,
+          stop_min_pct: float = 5.0, stop_max_pct: float = 18.0,
+          n_splits: int = 4, model_dir: Path | None = None,
+          frame: pd.DataFrame | None = None) -> dict:
     """Build features, label, validate walk-forward, fit, and register the run."""
     import joblib
 
@@ -185,8 +186,9 @@ def train(conn, *, source: str = "futgg", title: str = "fc26",
     if frame.empty:
         return {"error": "no data — run backfill-history first"}
 
-    frame = labels.add_labels(frame, horizon_days=horizon, target_pct=target_pct,
-                              stop_pct=stop_pct, tax_rate=tax_rate)
+    frame = labels.add_labels(frame, horizon_days=horizon,
+                              stop_buffer_pct=stop_buffer_pct,
+                              stop_min_pct=stop_min_pct, stop_max_pct=stop_max_pct)
     forecast_frame = frame
     direction_frame = _liquid_only(frame)   # never learn from unsellable cards
 

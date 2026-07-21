@@ -232,10 +232,14 @@ def cmd_picks(args) -> None:
     source = _resolve_source(conn, args.source, config)
     try:
         found = picks_mod.generate(
-            conn, source=source, target_pct=config.target_pct,
-            stop_pct=config.stop_pct, tax_rate=config.tax_rate,
+            conn, source=source, tax_rate=config.tax_rate,
             min_confidence=args.min_confidence, limit=args.limit,
-            min_price=args.min_price, min_sales_per_hour=args.min_sales_per_hour)
+            min_price=args.min_price, max_price=config.max_price,
+            entry_z_max=config.entry_z_max,
+            entry_floor_max_pct=config.entry_floor_max_pct,
+            stop_buffer_pct=config.stop_buffer_pct, stop_min_pct=config.stop_min_pct,
+            stop_max_pct=config.stop_max_pct, min_reward_risk=config.min_reward_risk,
+            min_sales_per_hour=args.min_sales_per_hour)
     except RuntimeError as e:
         sys.exit(str(e))
 
@@ -250,7 +254,8 @@ def cmd_picks(args) -> None:
         rating = f"{p.rating}" if p.rating else "--"
         print(f"{i:>2}. {p.name}  ({rating} {p.version[:28]})")
         print(f"    BUY   {band}          confidence {p.confidence:.0%}")
-        print(f"    SELL  ~{p.sell_target:,}      stop {p.stop:,}")
+        print(f"    SELL  ~{p.sell_target:,}      stop {p.stop:,}   "
+              f"(reward:risk {p.reward_risk:g})")
         liq = f"tier {p.liquidity_tier}" if p.liquidity_tier else "?"
         if p.sales_per_hour:
             liq += f", {p.sales_per_hour:.0f} sales/hr"
@@ -302,12 +307,13 @@ def cmd_train(args) -> None:
     setup_logging(config.log_path)
     conn = db.connect(config.database_path)
     source = _resolve_source(conn, args.source, config)
-    print(f"training on source={source!r}, horizon={args.horizon}d "
+    horizon = args.horizon or config.horizon_days
+    print(f"training on source={source!r}, horizon={horizon}d "
           f"(walk-forward, {args.splits} folds)...")
-    res = train_mod.train(conn, source=source, horizon=args.horizon,
-                          target_pct=config.target_pct,
-                          stop_pct=config.stop_pct,
-                          tax_rate=config.tax_rate, n_splits=args.splits)
+    res = train_mod.train(conn, source=source, horizon=horizon,
+                          stop_buffer_pct=config.stop_buffer_pct,
+                          stop_min_pct=config.stop_min_pct,
+                          stop_max_pct=config.stop_max_pct, n_splits=args.splits)
     if "error" in res:
         sys.exit(res["error"])
 
@@ -570,7 +576,8 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("train",
                        help="train + walk-forward validate the forecast and direction models")
     p.add_argument("--source", default=None)
-    p.add_argument("--horizon", type=int, default=7, help="label horizon in days")
+    p.add_argument("--horizon", type=int, default=None,
+                   help="label horizon in days (default: config horizon_days)")
     p.add_argument("--splits", type=int, default=4, help="walk-forward folds")
     p.set_defaults(func=cmd_train)
 

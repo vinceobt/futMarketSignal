@@ -8,7 +8,16 @@ platform: console       # console | pc
 database_path: data/market.db
 log_path: data/collector.log
 
-# Trade economics the model labels against
+# The trade: buy a cheap/mid card ON THE DIP (oversold, near its own floor),
+# sell into its resistance. Measured edge lives here — expensive icons are priced
+# efficiently and lose after tax, so max_price excludes them.
 tax_rate: 0.05          # EA transfer-market sell tax (5%)
-target_pct: 25.0        # profit target for the triple-barrier labels
-stop_pct: 8.0           # stop-loss for the triple-barrier labels
+horizon_days: 5         # days a trade is given to work
+min_price: 1000         # ignore near-discard noise
+max_price: 40000        # ignore efficiently-priced cards above this
+entry_z_max: -0.5       # only buy when this far below normal (the dip)
+entry_floor_max_pct: 5.0  # only buy within this % of the card's 30-day low
+stop_buffer_pct: 2.0    # stop sits this far below the card's support
+stop_min_pct: 5.0       # never tighter than this (noise room)
+stop_max_pct: 18.0      # never risk more than this
+min_reward_risk: 1.0    # skip trades whose upside isn't worth the downside

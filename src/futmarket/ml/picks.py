@@ -2,20 +2,20 @@
 
 Everything else in this package is machinery. This is the part a person uses.
 
-For each tracked card we take today's features, score them with the trained
-direction model, keep only cards that are genuinely sellable, and turn the raw
-numbers into a plain-English case: what price to pay, and the specific reasons
-the model liked it (near its floor, promo landing soon, Monday recovery window,
-day nine of the post-release slump, its cohort already moving).
+The trade, from measured edge: buy a **cheap/mid card on the dip** — oversold and
+near its own 30-day floor — and sell into its resistance. In backtest that returns
++5-11% on capital net of tax; expensive icons are priced efficiently and lose, so
+they're excluded. We take today's features, keep only cards that pass the dip gate
+and are genuinely sellable, score them with the trained model, size each trade to
+the card's own range, and turn it into a plain-English case.
 
-The buy price is a *band* taken from real completed sales, not the lowest
-listing. The lowest listing is usually a mispriced snipe nobody can catch; the
-band is what the card genuinely changes hands for.
+The buy price is a *band* taken from real completed sales, not the lowest listing.
+The lowest listing is usually a mispriced snipe nobody can catch; the band is what
+the card genuinely changes hands for.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 
@@ -30,14 +30,15 @@ logger = logging.getLogger(__name__)
 
 MIN_CONFIDENCE = 0.30        # below this the model isn't saying anything useful
 DEFAULT_LIMIT = 20
-# Percentage returns are wildly misleading on near-discard cards: a 200-coin card
-# going to 263 is "+31%" but earns 63 coins and can't be bought in any volume.
-# Judge a pick on the coins it could actually make, not the percentage.
-# A floor only to exclude discard-price noise, NOT to exclude cheap cards. Fodder
-# trading is a volume game: 700 coins on an 84-rated card, twenty at a time. A
-# 5,000 floor cut 69% of the market including the entire SBC fodder tier.
-MIN_PRICE = 1_000
-MIN_PROFIT_COINS = 400
+MIN_PRICE = 1_000            # ignore near-discard noise
+MAX_PRICE = 40_000           # ignore efficiently-priced cards (icons) that lose after tax
+ENTRY_Z_MAX = -0.5           # only buy when this far below normal (the dip)
+ENTRY_FLOOR_MAX_PCT = 5.0    # only buy within this % of the card's own 30-day low
+STOP_BUFFER_PCT = 2.0
+STOP_MIN_PCT = 5.0
+STOP_MAX_PCT = 18.0
+MIN_REWARD_RISK = 1.0
+FALLBACK_TARGET_PCT = 15.0   # when a card's resistance isn't known yet
 
 
 @dataclass
@@ -52,10 +53,31 @@ class Pick:
     buy_high: int | None
     sell_target: int
     stop: int
+    reward_risk: float
     liquidity_tier: str | None
     sales_per_hour: float | None
     url: str | None = None          # exact card -- names repeat across versions
     reasons: list[str] = field(default_factory=list)
+
+
+def _barriers(entry: int, ceil_pct, floor_pct, *, tax_rate: float,
+              stop_buffer_pct: float = STOP_BUFFER_PCT,
+              stop_min_pct: float = STOP_MIN_PCT, stop_max_pct: float = STOP_MAX_PCT
+              ) -> tuple[int, int, float]:
+    """(sell_target, stop, reward:risk) sized to the card's own structure.
+
+    Target = the card's resistance (its 30-day high). Stop = just below its
+    support (its 30-day low), floored for noise and capped for max loss. Reward
+    and risk are both net of tax, so the ratio is the real one.
+    """
+    target_pct = float(ceil_pct) if pd.notna(ceil_pct) and ceil_pct > 0 else FALLBACK_TARGET_PCT
+    stop_dist = (float(floor_pct) + stop_buffer_pct) if pd.notna(floor_pct) else stop_min_pct
+    stop_dist = min(max(stop_dist, stop_min_pct), stop_max_pct)
+    target = int(round(entry * (1 + target_pct / 100.0)))
+    stop = int(round(entry * (1 - stop_dist / 100.0)))
+    net_reward = target * (1 - tax_rate) / entry - 1.0
+    rr = net_reward / (stop_dist / 100.0) if stop_dist > 0 else 0.0
+    return target, stop, round(rr, 2)
 
 
 # --- turning numbers into a human case ------------------------------------
@@ -64,16 +86,19 @@ def _reasons(row: pd.Series) -> list[str]:
     """The specific, checkable reasons this card looks interesting today."""
     out: list[str] = []
 
+    # The core of the trade: it's on the dip (oversold, near its own floor).
+    z = row.get("z_score")
+    if pd.notna(z) and z <= -0.5:
+        out.append(f"on the dip — {abs(z):.1f} sigma below its own normal price")
     floor = row.get("dist_to_floor_pct")
     if pd.notna(floor):
         if floor < 0:
-            # Below the 30-day low is a falling knife, not a bargain. Say so.
             out.append(f"WARNING: {abs(floor):.0f}% BELOW its 30-day low — still falling")
-        elif floor <= 15:
-            out.append(f"near its floor ({floor:.0f}% above the 30-day low)")
-    z = row.get("z_score")
-    if pd.notna(z) and z <= -1:
-        out.append(f"unusually cheap for itself ({z:.1f} sigma below normal)")
+        elif floor <= 5:
+            out.append(f"right at its floor ({floor:.0f}% above the 30-day low)")
+    ceil = row.get("dist_to_ceiling_pct")
+    if pd.notna(ceil) and ceil >= 8:
+        out.append(f"room to bounce — resistance is {ceil:.0f}% up")
 
     dow = row.get("day_of_week")
     if pd.notna(dow):
@@ -178,13 +203,15 @@ def _load_latest_model(conn, *, kind: str = "direction", title: str = "fc26"):
 
 
 def generate(conn, *, source: str = "futgg", title: str = "fc26",
-             target_pct: float = 25.0, stop_pct: float = 8.0,
              tax_rate: float = 0.05, min_confidence: float = MIN_CONFIDENCE,
              limit: int = DEFAULT_LIMIT, min_price: int = MIN_PRICE,
-             min_profit_coins: int = MIN_PROFIT_COINS, skip_falling: bool = True,
+             max_price: int = MAX_PRICE, entry_z_max: float = ENTRY_Z_MAX,
+             entry_floor_max_pct: float = ENTRY_FLOOR_MAX_PCT,
+             stop_buffer_pct: float = STOP_BUFFER_PCT, stop_min_pct: float = STOP_MIN_PCT,
+             stop_max_pct: float = STOP_MAX_PCT, min_reward_risk: float = MIN_REWARD_RISK,
              fetch_missing_bands: bool = True, min_sales_per_hour: float = 0.0,
              liquid_tiers: tuple[str, ...] = ("A", "B")) -> list[Pick]:
-    """Today's ranked buy candidates, worth actually trading."""
+    """Today's ranked buy candidates: cheap/mid cards on the dip, worth trading."""
     artifact, run = _load_latest_model(conn, title=title)
     if artifact is None:
         raise RuntimeError("no trained model — run `futmarket train` first")
@@ -198,22 +225,21 @@ def generate(conn, *, source: str = "futgg", title: str = "fc26",
               .tail(1).copy())
     if "liq_tier" in latest.columns:
         latest = latest[latest["liq_tier"].isin(liquid_tiers)]
-    # Drop near-discard cards: their percentage moves are arithmetic noise and
-    # the coins involved aren't worth a trade.
-    latest = latest[latest["price"] >= min_price]
-    target_mult_pre = (1.0 + target_pct / 100.0) / (1.0 - tax_rate)
-    latest = latest[latest["price"] * (target_mult_pre - 1.0) >= min_profit_coins]
-    # Never recommend a card trading below its own 30-day low: that is a falling
-    # knife, not a discount. (The original rules engine gated on this and it was
-    # right to.) Cheapness alone is not a reason to buy.
-    if skip_falling and "dist_to_floor_pct" in latest.columns:
-        latest = latest[latest["dist_to_floor_pct"].fillna(0) >= 0]
+    # The tradeable universe: the edge lives in cheap/mid cards; expensive icons
+    # are priced efficiently and lose after tax.
+    latest = latest[(latest["price"] >= min_price) & (latest["price"] <= max_price)]
+    # The entry gate — this IS the edge: only buy on the dip, oversold and near
+    # the card's own floor. Cheapness alone loses money; the dip is what pays.
+    if "z_score" in latest.columns:
+        latest = latest[latest["z_score"] <= entry_z_max]
+    if "dist_to_floor_pct" in latest.columns:
+        floor = latest["dist_to_floor_pct"]
+        latest = latest[(floor >= 0) & (floor <= entry_floor_max_pct)]
     if latest.empty:
         return []
 
     cols = artifact["features"]
-    missing = [c for c in cols if c not in latest.columns]
-    for c in missing:
+    for c in [c for c in cols if c not in latest.columns]:
         latest[c] = np.nan
     latest["confidence"] = artifact["model"].predict_proba(latest[cols])[:, 1]
 
@@ -235,7 +261,6 @@ def generate(conn, *, source: str = "futgg", title: str = "fc26",
                         >= min_sales_per_hour)
         candidates = candidates[pd.Series(keep, index=candidates.index)]
 
-    target_mult = (1.0 + target_pct / 100.0) / (1.0 - tax_rate)
     picks: list[Pick] = []
     for row in candidates.itertuples(index=False):
         r = pd.Series(row._asdict())
@@ -249,11 +274,19 @@ def generate(conn, *, source: str = "futgg", title: str = "fc26",
             {"listed_price": listed, "sold_median": stats["sold_median"]}
             if stats is not None else None,
             listed_price=listed or price)
-        # Target and stop must be anchored to the price you would actually PAY.
-        # Deriving them from the current listing while quoting a band from
-        # completed sales put them on different scales -- it produced sell targets
-        # below the buy price.
+        # Barriers are anchored to the price you would actually PAY, and sized to
+        # the card's own range (resistance target, support stop).
         entry = band[1] if band else price
+        target, stop, rr = _barriers(
+            entry, r.get("dist_to_ceiling_pct"), r.get("dist_to_floor_pct"),
+            tax_rate=tax_rate, stop_buffer_pct=stop_buffer_pct,
+            stop_min_pct=stop_min_pct, stop_max_pct=stop_max_pct)
+        if rr < min_reward_risk:
+            continue                     # upside not worth the downside — skip
+        reasons = _reasons(r)
+        reasons.append(f"risking {round((1 - stop/entry) * 100)}% to make "
+                       f"{round((target * (1 - tax_rate) / entry - 1) * 100)}% "
+                       f"(reward:risk {rr:g})")
         picks.append(Pick(
             player_id=r["player_id"],
             name=str(r.get("name") or r["player_id"]),
@@ -263,21 +296,24 @@ def generate(conn, *, source: str = "futgg", title: str = "fc26",
             price_now=price,
             buy_low=band[0] if band else None,
             buy_high=band[1] if band else None,
-            sell_target=int(round(entry * target_mult)),
-            stop=int(round(entry * (1 - stop_pct / 100.0))),
+            sell_target=target,
+            stop=stop,
+            reward_risk=rr,
             liquidity_tier=r.get("liq_tier"),
             sales_per_hour=(float(stats["sales_per_hour"])
                             if stats is not None and stats["sales_per_hour"] else None),
             url=(meta["url"] if meta is not None else None),
-            reasons=_reasons(r),
+            reasons=reasons,
         ))
+        if len(picks) >= limit:
+            break
     logger.info("generated %d picks from run %s", len(picks),
                 run["run_id"] if run is not None else "?")
     return picks
 
 
 def save(conn, picks: list[Pick], *, title: str = "fc26",
-         horizon_days: int = 7) -> int:
+         horizon_days: int = 5) -> int:
     """Record today's picks so the market can grade them later.
 
     Stores the price you'd realistically have paid and the barriers it will be

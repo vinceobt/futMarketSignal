@@ -51,8 +51,20 @@ class Config:
     database_path: Path
     log_path: Path
     tax_rate: float             # EA transfer-market sell tax
-    target_pct: float           # profit target for the triple-barrier labels
-    stop_pct: float             # stop-loss for the triple-barrier labels
+    horizon_days: int           # how long a trade is given to work
+    # The trade, from measured edge: buy a cheap/mid card ON THE DIP (oversold,
+    # near its own floor), sell into its resistance. Backtest: cheap+mid fodder
+    # bought oversold returns +5-11% on capital net of tax; expensive icons are
+    # priced efficiently and lose, so they're excluded by max_price.
+    min_price: int              # ignore near-discard noise below this
+    max_price: int              # ignore efficiently-priced cards above this
+    entry_z_max: float          # only buy when this many sigma below normal (the dip)
+    entry_floor_max_pct: float  # only buy within this % of the card's own 30-day low
+    # Per-card stop: just below the card's support, with room for noise and a cap.
+    stop_buffer_pct: float
+    stop_min_pct: float
+    stop_max_pct: float
+    min_reward_risk: float      # skip trades whose upside isn't worth the downside
 
 
 def load_config(path: str | Path) -> Config:
@@ -76,6 +88,13 @@ def load_config(path: str | Path) -> Config:
         database_path=base / raw.get("database_path", "data/market.db"),
         log_path=base / raw.get("log_path", "data/collector.log"),
         tax_rate=float(raw.get("tax_rate", 0.05)),
-        target_pct=float(raw.get("target_pct", 25.0)),
-        stop_pct=float(raw.get("stop_pct", 8.0)),
+        horizon_days=int(raw.get("horizon_days", 5)),
+        min_price=int(raw.get("min_price", 1000)),
+        max_price=int(raw.get("max_price", 40000)),
+        entry_z_max=float(raw.get("entry_z_max", -0.5)),
+        entry_floor_max_pct=float(raw.get("entry_floor_max_pct", 5.0)),
+        stop_buffer_pct=float(raw.get("stop_buffer_pct", 2.0)),
+        stop_min_pct=float(raw.get("stop_min_pct", 5.0)),
+        stop_max_pct=float(raw.get("stop_max_pct", 18.0)),
+        min_reward_risk=float(raw.get("min_reward_risk", 1.0)),
     )

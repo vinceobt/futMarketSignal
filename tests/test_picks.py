@@ -15,13 +15,18 @@ def _row(**kw):
 
 
 def test_reason_near_floor():
-    out = picks._reasons(_row(dist_to_floor_pct=8.0))
+    out = picks._reasons(_row(dist_to_floor_pct=3.0))
     assert any("floor" in r for r in out)
 
 
-def test_reason_cheap_for_itself():
+def test_reason_on_the_dip():
     out = picks._reasons(_row(z_score=-2.0))
-    assert any("sigma below normal" in r for r in out)
+    assert any("on the dip" in r and "sigma" in r for r in out)
+
+
+def test_reason_room_to_bounce():
+    out = picks._reasons(_row(dist_to_ceiling_pct=20.0))
+    assert any("room to bounce" in r for r in out)
 
 
 def test_reason_weekly_supply_cycle():
@@ -83,8 +88,17 @@ def test_extreme_relative_strength_is_not_quoted():
     assert any("lagging its group" in r for r in picks._reasons(_row(rel_strength_7d=-12.0)))
 
 
-def test_sell_target_always_exceeds_buy_price():
-    """Guards the bug where target came from the listing but the band from sales."""
-    entry, target_pct, tax = 22_000, 25.0, 0.05
-    target = round(entry * (1 + target_pct / 100) / (1 - tax))
-    assert target > entry
+def test_barriers_target_resistance_stop_support():
+    """Target sits at the card's resistance, stop below its support, and the
+    reward:risk is computed net of tax."""
+    target, stop, rr = picks._barriers(
+        20_000, ceil_pct=20.0, floor_pct=4.0, tax_rate=0.05)
+    assert target == 24_000                     # +20% to resistance
+    assert stop == round(20_000 * (1 - 0.06))   # floor 4% + 2% buffer
+    assert target > 20_000 > stop and rr > 1.0
+
+
+def test_barriers_reward_risk_reflects_a_thin_ceiling():
+    """A card near its ceiling has little upside -> low reward:risk (gets skipped)."""
+    _, _, rr = picks._barriers(20_000, ceil_pct=3.0, floor_pct=4.0, tax_rate=0.05)
+    assert rr < 1.0
