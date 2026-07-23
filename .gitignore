@@ -15,3 +15,6 @@ data/
 # Credentials — never commit
 .env
 .x_session.json
+
+# Discord training exports (third-party content + token-adjacent, keep out of git)
+data/discord/
