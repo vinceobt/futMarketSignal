@@ -587,6 +587,11 @@ def cmd_dashboard(args) -> None:
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
+def cmd_trader_tips(args) -> None:
+    from futmarket.ml.trader_clone import advise
+    advise(per_tier=args.per_tier)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="futmarket", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -639,6 +644,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--refresh", action="store_true",
                    help="rebuild the scored cache instead of using it")
     p.set_defaults(func=cmd_advise)
+
+    p = sub.add_parser("trader-tips",
+                       help="buy tips across every price tier, learned from the Discord "
+                            "pros (buy the dip, sell into the Wednesday peak)")
+    p.add_argument("--per-tier", type=int, default=8,
+                   help="how many tips to show per price tier (cheap/mid/premium/elite)")
+    p.set_defaults(func=cmd_trader_tips)
 
     p = sub.add_parser("x-login",
                        help="capture an X session (burner account) for the reader")
