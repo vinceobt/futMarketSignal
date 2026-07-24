@@ -295,6 +295,7 @@ CONTROLS = [
     ("scorecard", "Grade record", "score any picks the market has answered"),
     ("insights", "Refresh rhythms", "recompute the weekly/hourly charts"),
     ("advise-refresh", "Refresh consult", "rescore every card for the consult"),
+    ("trader-tips", "Trader tips", "recompute all-tier buy tips from the pros (~1 min)"),
     ("train", "Retrain model", "retrain on all data (~10 min)"),
 ]
 
@@ -373,6 +374,34 @@ def record_fragment(conn, *, title: str = "fc26") -> str:
 
 # --------------------------------------------------------------------- render
 
+def render_trader_tips(tips) -> str:
+    """The trader-tips panel HTML, read from the cached advisor result."""
+    if not tips:
+        return ('<p class="empty">Not computed yet — hit the "Trader tips" control '
+                'below (takes ~1 min).</p>')
+    ho = " · ".join(f"{h['tier'].split()[0]} {h['top']*100:+.0f}%"
+                    for h in tips.get("held_out", []) if h.get("top") is not None)
+    parts = [f'<p class="lede">Learned from {tips.get("trained_on", 0)} trader buys · '
+             f'held-out top picks: {_esc(ho) or "n/a"} · as of '
+             f'{_esc(tips.get("computed_at", ""))}. Buy the dip, sell into the Wednesday '
+             f'peak. <b>Paper-trade before trusting.</b></p>']
+    for name, rows in tips.get("tiers", {}).items():
+        if not rows:
+            continue
+        cells = ""
+        for t in rows:
+            nm = (f'<a href="{_esc(t["url"])}" target="_blank" rel="noopener">'
+                  f'{_esc(t["name"])}</a>' if t.get("url") else _esc(t["name"]))
+            cells += (f'<tr><td>{t["pred"]*100:+.1f}%</td><td>{_fmt(t["coins"])}</td>'
+                      f'<td>{_fmt(t["price"])}</td><td>{t["upd"]:.0f}/day</td>'
+                      f'<td>{nm}</td></tr>')
+        parts.append(
+            f'<h3>{_esc(name)}</h3><table class="tips">'
+            f'<tr><th>pred</th><th>coin profit</th><th>price</th>'
+            f'<th>fillable</th><th>card</th></tr>{cells}</table>')
+    return "".join(parts)
+
+
 def render(conn, *, source: str = "futgg", title: str = "fc26",
            limit: int = 12) -> str:
     """Build the page. Live queries for everything cheap; cached rhythms."""
@@ -407,6 +436,10 @@ def render(conn, *, source: str = "futgg", title: str = "fc26",
     holding_html = holding_fragment(conn, source=source, title=title)
     record_html = record_fragment(conn, title=title)
     controls_html = render_controls()
+
+    import json as _json
+    _tt = db.meta_get(conn, "trader_tips")
+    trader_tips_html = render_trader_tips(_json.loads(_tt) if _tt else None)
 
     stats = insights.load(conn) or {}
     rhythm_age = stats.get("computed_at", "not computed yet")
@@ -484,6 +517,12 @@ def render(conn, *, source: str = "futgg", title: str = "fc26",
     each card. Buy prices are ranges anchored to the live listing. Only cards that
     genuinely trade are shown.</p>
   <div id="picks-out" class="picks">{picks_html}</div></section>
+
+<section id="trader-tips"><h2>Trader tips (all tiers)</h2>
+  <p class="lede">Buy tips across every price tier — cheap to elite — learned from the
+    Discord pros' calls. Ranked by predicted return, coin profit, and how fillable the
+    card is. The pros' edge is mostly fast execution, so treat this as a watchlist.</p>
+  <div id="trader-tips-out">{trader_tips_html}</div></section>
 
 <section id="holding"><h2>Holding</h2>
   <p class="lede">Open positions from the current strategy — where each sits versus its

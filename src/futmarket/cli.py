@@ -589,7 +589,7 @@ def cmd_dashboard(args) -> None:
 
 def cmd_trader_tips(args) -> None:
     from futmarket.ml.trader_clone import advise
-    advise(per_tier=args.per_tier)
+    advise(per_tier=args.per_tier, cache=True)   # cache so /ml shows the same tips
 
 
 def main(argv: list[str] | None = None) -> None:

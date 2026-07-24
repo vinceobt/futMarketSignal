@@ -72,12 +72,20 @@ def _train(conn, config: Config) -> str:
             f"top-pick precision {d.get('precision_at_top_decile', 0) * 100:.0f}%")
 
 
+def _trader_tips(conn, config: Config) -> str:
+    from ..ml.trader_clone import advise
+    r = advise(conn, cache=True, quiet=True)
+    n = sum(len(v) for v in r["tiers"].values())
+    return f"trader tips refreshed ({n} across {len(r['tiers'])} tiers)"
+
+
 ACTIONS = {
     "collect-bulk": _collect_bulk,
     "picks": _run_picks,
     "scorecard": _grade,
     "insights": _insights,
     "advise-refresh": _advise_refresh,
+    "trader-tips": _trader_tips,
     "train": _train,
 }
 

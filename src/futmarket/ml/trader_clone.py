@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 import sqlite3
 import statistics
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 from sklearn.ensemble import HistGradientBoostingClassifier
@@ -256,9 +256,19 @@ def _tier(p):
             else "premium(40-150k)" if p < 150000 else "elite  (150k+)")
 
 
-def advise(per_tier=8):
+TIER_ORDER = [("cheap  (<5k)", 0, 5000), ("mid    (5-40k)", 5000, 40000),
+              ("premium(40-150k)", 40000, 150000), ("elite  (150k+)", 150000, 9e9)]
+
+
+def advise(conn=None, per_tier=8, cache=False, quiet=False):
+    """Train the all-tier weekly-cycle advisor and return a structured result.
+
+    conn: an open market.db connection (the dashboard passes one). If None, opens
+    its own. cache=True stores the result in the `meta` table for the dashboard.
+    """
     from sklearn.ensemble import HistGradientBoostingRegressor
-    m = sqlite3.connect(ROOT / "data" / "market.db")
+    own_conn = conn is None
+    m = conn or sqlite3.connect(ROOT / "data" / "market.db")
     d = sqlite3.connect(ROOT / "data" / "discord.db")
     idx = build_index(m)
     rating_of = dict(m.execute("SELECT player_id, rating FROM card_meta"))
@@ -289,26 +299,25 @@ def advise(per_tier=8):
     reg.fit(X[:cut], yv[:cut])
     pred, act, pent = reg.predict(X[cut:]), yv[cut:], ent[cut:]
 
-    print(f"trained on {len(yv)} trader buys (all tiers), sell-into-Wednesday exit\n")
-    print("=== honest held-out: what the model's TOP picks actually returned, by tier ===")
-    print(f"{'tier':18} {'setups':>7} {'avg':>7} {'model top 20%':>14}")
-    for name, lo, hi in [("cheap  (<5k)", 0, 5000), ("mid    (5-40k)", 5000, 40000),
-                         ("premium(40-150k)", 40000, 150000), ("elite  (150k+)", 150000, 9e9)]:
+    held = []
+    for name, lo, hi in TIER_ORDER:
         mask = (pent >= lo) & (pent < hi)
-        if mask.sum() < 8:
-            print(f"{name:18} {int(mask.sum()):>7}  (too few to judge)")
+        n = int(mask.sum())
+        if n < 8:
+            held.append({"tier": name.strip(), "n": n, "avg": None, "top": None})
             continue
         a, p = act[mask], pred[mask]
         k = max(1, int(len(p) * 0.20))
         top = a[np.argsort(p)[::-1][:k]]
-        print(f"{name:18} {int(mask.sum()):>7} {a.mean()*100:>+6.1f}% {top.mean()*100:>+13.1f}%")
+        held.append({"tier": name.strip(), "n": n,
+                     "avg": float(a.mean()), "top": float(top.mean())})
 
     reg.fit(X, yv)
     latest = _to_utc(m.execute("SELECT MAX(timestamp) FROM price_snapshots").fetchone()[0])
     active = [r[0] for r in m.execute(
         "SELECT DISTINCT player_id FROM price_snapshots WHERE source='futgg' "
         "AND timestamp >= ?", ((latest - timedelta(days=3)).isoformat(),))]
-    tiers: dict[str, list] = {}
+    buckets: dict[str, list] = {}
     for pid in active:
         if (liq.get(pid) or 0) < 3:                 # skip illiquid/unfillable cards
             continue
@@ -318,17 +327,48 @@ def advise(per_tier=8):
             continue
         f = feats2(ser, latest, rating_of.get(pid), ev_days)
         if f:
-            pr = reg.predict([f])[0]
-            tiers.setdefault(_tier(price), []).append((pr, pr * price, pid, price))
+            buckets.setdefault(_tier(price), []).append((float(reg.predict([f])[0]), pid, price))
 
-    print("\n=== tips right now, every tier (buy the dip, sell into Wednesday) ===")
-    for name in ["cheap  (<5k)", "mid    (5-40k)", "premium(40-150k)", "elite  (150k+)"]:
-        rows = sorted(tiers.get(name, []), reverse=True)[:per_tier]
-        print(f"\n-- {name} --   pred%  coin_profit   price   upd/day  card")
-        for pr, coins, pid, price in rows:
-            nm = m.execute("SELECT name FROM card_meta WHERE player_id=?", (pid,)).fetchone()[0]
-            print(f"   {pr*100:>+5.1f}%  {coins:>10,.0f}  {price:>8,}  {liq.get(pid,0):>6.0f}   {nm}")
+    tiers_out = {}
+    for name, _, _ in TIER_ORDER:
+        out = []
+        for pr, pid, price in sorted(buckets.get(name, []), reverse=True)[:per_tier]:
+            nm, url = m.execute("SELECT name, url FROM card_meta WHERE player_id=?",
+                                (pid,)).fetchone()
+            out.append({"pred": pr, "coins": pr * price, "price": price,
+                        "upd": liq.get(pid) or 0, "name": nm, "url": url})
+        tiers_out[name.strip()] = out
+
+    result = {"computed_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+              "trained_on": int(len(yv)), "held_out": held, "tiers": tiers_out}
+
+    if not quiet:
+        print(f"trained on {len(yv)} trader buys (all tiers), sell-into-Wednesday exit\n")
+        print("=== honest held-out: what the model's TOP picks actually returned, by tier ===")
+        print(f"{'tier':18} {'setups':>7} {'avg':>7} {'model top 20%':>14}")
+        for h in held:
+            if h["avg"] is None:
+                print(f"{h['tier']:18} {h['n']:>7}  (too few to judge)")
+            else:
+                print(f"{h['tier']:18} {h['n']:>7} {h['avg']*100:>+6.1f}% {h['top']*100:>+13.1f}%")
+        print("\n=== tips right now, every tier (buy the dip, sell into Wednesday) ===")
+        for name, _, _ in TIER_ORDER:
+            print(f"\n-- {name} --   pred%  coin_profit   price   upd/day  card")
+            for t in tiers_out[name.strip()]:
+                print(f"   {t['pred']*100:>+5.1f}%  {t['coins']:>10,.0f}  {t['price']:>8,}  "
+                      f"{t['upd']:>6.0f}   {t['name']}")
+
+    if cache:
+        from futmarket import db
+        db.meta_set(m, "trader_tips", __import__("json").dumps(result))
+        m.commit()
+    d.close()
+    if own_conn and not cache:
+        m.close()
+    elif own_conn:
+        m.close()
+    return result
 
 
 if __name__ == "__main__":
-    advise()
+    advise(cache=True)
