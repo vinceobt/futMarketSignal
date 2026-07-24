@@ -55,6 +55,8 @@ run_step "sell-alerts"  "$FUT" sell-alerts
 run_step "scorecard"    "$FUT" scorecard
 # Rhythms sweep millions of rows, so the dashboard reads them from cache.
 run_step "insights"     "$FUT" insights
+# All-tier buy tips learned from the Discord pros, cached for the /ml panel (~1 min).
+run_step "trader-tips"  "$FUT" trader-tips
 # A short Discord summary so the owner can keep account of every run.
 run_step "notify"       "$FUT" notify
 echo "[$(stamp)] --- ml cycle done ---" >>"$LOG"
