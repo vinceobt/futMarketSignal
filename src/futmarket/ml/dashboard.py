@@ -402,6 +402,13 @@ def render_trader_tips(tips) -> str:
     return "".join(parts)
 
 
+def trader_tips_fragment(conn) -> str:
+    """The trader-tips panel HTML, read from cache — used by render and the JS refresh."""
+    import json
+    raw = db.meta_get(conn, "trader_tips")
+    return render_trader_tips(json.loads(raw) if raw else None)
+
+
 def render(conn, *, source: str = "futgg", title: str = "fc26",
            limit: int = 12) -> str:
     """Build the page. Live queries for everything cheap; cached rhythms."""
@@ -437,9 +444,7 @@ def render(conn, *, source: str = "futgg", title: str = "fc26",
     record_html = record_fragment(conn, title=title)
     controls_html = render_controls()
 
-    import json as _json
-    _tt = db.meta_get(conn, "trader_tips")
-    trader_tips_html = render_trader_tips(_json.loads(_tt) if _tt else None)
+    trader_tips_html = trader_tips_fragment(conn)
 
     stats = insights.load(conn) or {}
     rhythm_age = stats.get("computed_at", "not computed yet")
@@ -784,7 +789,7 @@ document.querySelectorAll('[data-group]').forEach(el => el.addEventListener('cli
   frag('/api/advise/group?dim=' + encodeURIComponent(dim) + '&value=' + encodeURIComponent(val), '#consult-out');
 }));
 // controls
-function refreshLive(){ frag('/api/scorecard', '#record-out'); frag('/api/picks', '#picks-out'); frag('/api/holding', '#holding-out'); }
+function refreshLive(){ frag('/api/scorecard', '#record-out'); frag('/api/picks', '#picks-out'); frag('/api/holding', '#holding-out'); frag('/api/trader-tips', '#trader-tips-out'); }
 async function poll(id, action, btn){
   const s = $('#ctl-status');
   try {
