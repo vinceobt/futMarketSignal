@@ -31,6 +31,17 @@ ROOT = Path(__file__).resolve().parents[3]
 # so cycling models multiplies throughput per account. flash-latest is the most
 # accurate free option; lite is lighter and its quota is separate.
 MODELS = ["gemini-flash-latest", "gemini-flash-lite-latest"]
+
+# OpenRouter path: paid credits, no daily cap -> finishes in one sitting.
+OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+OR_MODELS = ["openrouter/auto"]   # slug verified against /models
+OR_SHAPE = (
+    'Return ONLY a JSON object of exactly this shape (a json object):\n'
+    '{"is_call": true|false, "calls": [{"card": string, "version": string|null, '
+    '"action": "buy|sell|watch|avoid|hold", "price": integer|null, '
+    '"price_kind": "buy_below|target|current|drop_to|sell_at|range|unknown", '
+    '"condition": string|null, "confidence": number}]}'
+)
 # Free-tier Flash. Good enough for this extraction; swap for a stronger model
 # only if the sample shows it fumbling the judgement calls.
 DEFAULT_MODEL = "gemini-flash-latest"
@@ -132,6 +143,35 @@ def extract_one(client: httpx.Client, key: str, msg: dict,
     data = r.json()
     text = data["candidates"][0]["content"]["parts"][0]["text"]
     return json.loads(text)
+
+
+def extract_one_openrouter(client: httpx.Client, key: str, msg: dict,
+                           model: str = OR_MODELS[0]) -> dict:
+    """Read one message via OpenRouter. Returns parsed dict."""
+    body = {
+        "model": model,
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": SYSTEM + "\n\n" + OR_SHAPE},
+            {"role": "user", "content": _prompt(msg["channel"], msg["content"])},
+        ],
+    }
+    r = client.post(OPENROUTER_ENDPOINT,
+                    headers={"Authorization": f"Bearer {key}"}, json=body, timeout=60)
+    r.raise_for_status()
+    txt = r.json()["choices"][0]["message"]["content"]
+    # Some providers wrap JSON in a ```json fence or add prose; slice to the object.
+    i, j = txt.find("{"), txt.rfind("}")
+    return json.loads(txt[i:j + 1])
+
+
+def load_openrouter_key() -> str:
+    for line in (ROOT / ".env").read_text().splitlines():
+        m = re.match(r"^\s*OPENROUTER_API_KEY\s*=\s*(.+?)\s*$", line)
+        if m and m.group(1):
+            return m.group(1)
+    raise RuntimeError("OPENROUTER_API_KEY not found in .env")
 
 
 def run_sample(db_path: Path, n: int = 15, model: str = DEFAULT_MODEL,
@@ -258,11 +298,18 @@ def _store(conn, row: dict, ext: dict | None, model: str, error: str | None):
     conn.commit()
 
 
-def run_full(db_path: Path, per_call_delay: float = 6.0, log_every: int = 25):
-    """Process all un-read FC-26 candidates. Resumable; safe to re-run."""
-    keys = load_keys()
+def run_full(db_path: Path, per_call_delay: float = 6.0, log_every: int = 25,
+             provider: str = "gemini"):
+    """Process all un-read FC-26 candidates. Resumable; safe to re-run.
+
+    provider: "gemini" (free, daily-capped, multi-key pool) or
+    "openrouter" (paid credits, no daily cap, model from OPENROUTER_MODEL)."""
+    if provider == "openrouter":
+        keys, models, call_fn = [load_openrouter_key()], OR_MODELS, extract_one_openrouter
+    else:
+        keys, models, call_fn = load_keys(), MODELS, extract_one
     lanes = [Lane(k, i + 1, m, per_call_delay)
-             for i, k in enumerate(keys) for m in MODELS]
+             for i, k in enumerate(keys) for m in models]
     conn = sqlite3.connect(db_path)
     conn.executescript(TABLES)
     conn.row_factory = sqlite3.Row
@@ -275,8 +322,8 @@ def run_full(db_path: Path, per_call_delay: float = 6.0, log_every: int = 25):
     ).fetchall()
 
     total = len(pending)
-    print(f"pool: {len(keys)} key(s) x {len(MODELS)} model(s) = {len(lanes)} lanes | "
-          f"{total} messages to read", flush=True)
+    print(f"[{provider}] pool: {len(keys)} key(s) x {len(models)} model(s) = "
+          f"{len(lanes)} lanes | {total} messages to read", flush=True)
     done = calls = 0
     with httpx.Client() as client:
         for row in pending:
@@ -289,7 +336,7 @@ def run_full(db_path: Path, per_call_delay: float = 6.0, log_every: int = 25):
                     conn.close()
                     return
                 try:
-                    ext = extract_one(client, lane.key, r, model=lane.model)
+                    ext = call_fn(client, lane.key, r, model=lane.model)
                     _store(conn, r, ext, lane.model, None)
                     lane.ok()
                     done += 1
@@ -322,8 +369,10 @@ def run_full(db_path: Path, per_call_delay: float = 6.0, log_every: int = 25):
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "run":
-        delay = float(sys.argv[2]) if len(sys.argv) > 2 else 6.0
-        run_full(ROOT / "data" / "discord.db", per_call_delay=delay)
+        provider = sys.argv[2] if len(sys.argv) > 2 else "gemini"
+        default_delay = 0.6 if provider == "openrouter" else 6.0
+        delay = float(sys.argv[3]) if len(sys.argv) > 3 else default_delay
+        run_full(ROOT / "data" / "discord.db", per_call_delay=delay, provider=provider)
     else:  # sample mode: `python -m ... [n]`
         n = int(sys.argv[1]) if len(sys.argv) > 1 else 15
         print(json.dumps(run_sample(ROOT / "data" / "discord.db", n=n),
