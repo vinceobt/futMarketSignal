@@ -374,32 +374,56 @@ def record_fragment(conn, *, title: str = "fc26") -> str:
 
 # --------------------------------------------------------------------- render
 
+_TIP_TIERS = {"cheap  (<5k)": ("Cheap", "under 5k"),
+              "mid    (5-40k)": ("Mid", "5k – 40k"),
+              "premium(40-150k)": ("Premium", "40k – 150k"),
+              "elite  (150k+)": ("Elite", "150k+")}
+
+
 def render_trader_tips(tips) -> str:
     """The trader-tips panel HTML, read from the cached advisor result."""
     if not tips:
         return ('<p class="empty">Not computed yet — hit the "Trader tips" control '
                 'below (takes ~1 min).</p>')
-    ho = " · ".join(f"{h['tier'].split()[0]} {h['top']*100:+.0f}%"
-                    for h in tips.get("held_out", []) if h.get("top") is not None)
-    parts = [f'<p class="lede">Learned from {tips.get("trained_on", 0)} trader buys · '
-             f'held-out top picks: {_esc(ho) or "n/a"} · as of '
-             f'{_esc(tips.get("computed_at", ""))}. Buy the dip, sell into the Wednesday '
-             f'peak. <b>Paper-trade before trusting.</b></p>']
-    for name, rows in tips.get("tiers", {}).items():
+
+    chips = ""
+    for h in tips.get("held_out", []):
+        if h.get("top") is None:
+            continue
+        lab = _TIP_TIERS.get(h["tier"], (h["tier"], ""))[0]
+        cls = "up" if h["top"] >= 0 else "down"
+        chips += f'<span class="ho {cls}">{lab} {h["top"]*100:+.0f}%</span>'
+
+    head = (f'<p class="lede">Learned from {tips.get("trained_on", 0):,} of the pros’ '
+            f'buy calls — buy the dip, sell into the Wednesday peak. The edge is thin and '
+            f'the pros mostly win on fast execution, so treat this as a <b>watchlist to '
+            f'paper-trade</b>, not a guarantee.</p>'
+            f'<div class="ho-row"><span class="ho-lbl">held-out top picks</span>{chips or "—"}'
+            f'<span class="ho-age">· as of {_esc(tips.get("computed_at", ""))}</span></div>')
+
+    cards = ""
+    for name, (lab, rng) in _TIP_TIERS.items():
+        rows = tips.get("tiers", {}).get(name, [])
         if not rows:
             continue
-        cells = ""
+        body = ""
         for t in rows:
-            nm = (f'<a href="{_esc(t["url"])}" target="_blank" rel="noopener">'
-                  f'{_esc(t["name"])}</a>' if t.get("url") else _esc(t["name"]))
-            cells += (f'<tr><td>{t["pred"]*100:+.1f}%</td><td>{_fmt(t["coins"])}</td>'
-                      f'<td>{_fmt(t["price"])}</td><td>{t["upd"]:.0f}/day</td>'
-                      f'<td>{nm}</td></tr>')
-        parts.append(
-            f'<h3>{_esc(name)}</h3><table class="tips">'
-            f'<tr><th>pred</th><th>coin profit</th><th>price</th>'
-            f'<th>fillable</th><th>card</th></tr>{cells}</table>')
-    return "".join(parts)
+            nm = (f'<a href="{_esc(t["url"])}" target="_blank" rel="noopener" class="tnm">'
+                  f'{_esc(t["name"])}</a>' if t.get("url")
+                  else f'<span class="tnm">{_esc(t["name"])}</span>')
+            pcls = "up" if t["pred"] >= 0 else "down"
+            sign = "+" if t["coins"] >= 0 else ""
+            body += (f'<tr><td class="t-card">{nm}'
+                     f'<span class="t-liq">{t["upd"]:.0f} sales/day</span></td>'
+                     f'<td class="t-num t-pred {pcls}">{t["pred"]*100:+.1f}%</td>'
+                     f'<td class="t-num t-coin">{sign}{_fmt(t["coins"])}</td>'
+                     f'<td class="t-num t-price">{_fmt(t["price"])}</td></tr>')
+        cards += (f'<div class="tier-card"><div class="tier-head">'
+                  f'<span class="tier-tag">{lab}</span><span class="tier-rng">{rng}</span></div>'
+                  f'<table class="tips"><thead><tr><th class="t-card">card</th>'
+                  f'<th class="t-num">gain</th><th class="t-num">profit/card</th>'
+                  f'<th class="t-num">price</th></tr></thead><tbody>{body}</tbody></table></div>')
+    return head + f'<div class="tips-grid">{cards}</div>'
 
 
 def trader_tips_fragment(conn) -> str:
@@ -762,6 +786,38 @@ button.ctl:hover:not(:disabled),button.ctl:focus-visible{border-color:var(--acce
 button.ctl:disabled{opacity:.5;cursor:progress}
 .ctl-status{margin:14px 0 0;font-size:13px;color:var(--ink-2);
   background:var(--raised);border:1px solid var(--line);border-radius:8px;padding:10px 13px}
+/* trader tips */
+.ho-row{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:-4px 0 18px}
+.ho-lbl{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--ink-3)}
+.ho{font-size:12px;padding:2px 9px;border-radius:99px;border:1px solid var(--line);
+  font-variant-numeric:tabular-nums}
+.ho.up{color:var(--up);border-color:color-mix(in srgb,var(--up) 32%,transparent)}
+.ho.down{color:var(--down);border-color:color-mix(in srgb,var(--down) 32%,transparent)}
+.ho-age{font-size:12px;color:var(--ink-3)}
+.tips-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
+.tier-card{background:var(--surface);border:1px solid var(--line);border-radius:12px;
+  padding:14px 16px 6px;box-shadow:var(--shadow)}
+.tier-head{display:flex;align-items:baseline;gap:9px;margin-bottom:2px}
+.tier-tag{font-family:"Avenir Next Condensed","Helvetica Neue",system-ui,sans-serif;
+  font-size:15px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--accent)}
+.tier-rng{font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+table.tips{width:100%;border-collapse:collapse}
+table.tips th{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3);
+  font-weight:600;padding:4px 0 7px;border-bottom:1px solid var(--line)}
+table.tips th.t-card{text-align:left}
+table.tips td{padding:8px 0;border-bottom:1px solid var(--line);font-size:13px;vertical-align:baseline}
+table.tips tbody tr:last-child td{border-bottom:none}
+.tips td.t-card{padding-right:10px}
+.tips .tnm{color:var(--ink);text-decoration:none;font-weight:500;
+  border-bottom:1px solid transparent;line-height:1.3}
+a.tnm:hover,a.tnm:focus-visible{color:var(--accent);border-bottom-color:currentColor}
+.tips .t-liq{display:block;font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums;margin-top:1px}
+.tips .t-num{text-align:right;white-space:nowrap;padding-left:12px;
+  font-family:ui-monospace,"SF Mono",Menlo,monospace;font-variant-numeric:tabular-nums}
+.tips td.t-pred{font-weight:600}
+.tips td.t-pred.up{color:var(--up)}.tips td.t-pred.down{color:var(--down)}
+.tips td.t-coin{color:var(--ink);font-weight:500}
+.tips td.t-price{color:var(--ink-3)}
 """
 
 
