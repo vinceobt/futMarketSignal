@@ -236,5 +236,99 @@ def train_profit(top=20, hold=3, min_price=5000, max_price=80000):
         print(f"{pr*100:>+5.1f}%  {price or 0:>8,}  {name}  {url or ''}")
 
 
+def realized_weekly(m, pid, when, call):
+    """Buy on the dip, SELL INTO THE NEXT WEDNESDAY PEAK (<=7d), all fees in."""
+    ser = series(m, pid, when - timedelta(days=2), when + timedelta(days=9))
+    entry, ft = _entry(ser, when, call)
+    if not entry:
+        return None, None
+    # next Wednesday (weekday 2) on/after the fill, within 7 days
+    exit_dt = next((ft + timedelta(days=k) for k in range(1, 8)
+                    if (ft + timedelta(days=k)).weekday() == 2), ft + timedelta(days=5))
+    ex = _near(ser, exit_dt)
+    if not ex:
+        return None, None
+    return (ex * SELL_TAX) / (entry * BUY_PREMIUM) - 1, entry
+
+
+def _tier(p):
+    return ("cheap  (<5k)" if p < 5000 else "mid    (5-40k)" if p < 40000
+            else "premium(40-150k)" if p < 150000 else "elite  (150k+)")
+
+
+def advise(per_tier=8):
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    m = sqlite3.connect(ROOT / "data" / "market.db")
+    d = sqlite3.connect(ROOT / "data" / "discord.db")
+    idx = build_index(m)
+    rating_of = dict(m.execute("SELECT player_id, rating FROM card_meta"))
+    liq = {r[0]: r[1] for r in m.execute(
+        "SELECT player_id, updates_per_day FROM liquidity WHERE title='fc26'")}
+    ev_days = sorted({_to_utc(f"{r[0]}T00:00:00Z").date()
+                      for r in m.execute("SELECT start_date FROM market_events")})
+
+    X, yv, ent, dates = [], [], [], []
+    for row in d.execute("SELECT card, version, price, price_kind, timestamp "
+                         "FROM discord_calls WHERE action='buy'"):
+        call = dict(zip(["card", "version", "price", "price_kind", "timestamp"], row))
+        pid = resolve(m, idx, call)
+        if not pid:
+            continue
+        when = _to_utc(call["timestamp"])
+        f = feats2(series(m, pid, when - timedelta(days=20), when), when,
+                   rating_of.get(pid), ev_days)
+        r, entry = realized_weekly(m, pid, when, call)
+        if f and r is not None:
+            X.append(f); yv.append(r); ent.append(entry); dates.append(when)
+    X, yv, ent = np.array(X), np.clip(yv, -0.5, 0.5), np.array(ent)  # winsorize noise
+    order = np.argsort([dt.timestamp() for dt in dates])
+    X, yv, ent = X[order], yv[order], ent[order]
+    cut = int(len(yv) * 0.75)
+    reg = HistGradientBoostingRegressor(max_iter=400, learning_rate=0.05,
+                                        max_depth=4, random_state=0)
+    reg.fit(X[:cut], yv[:cut])
+    pred, act, pent = reg.predict(X[cut:]), yv[cut:], ent[cut:]
+
+    print(f"trained on {len(yv)} trader buys (all tiers), sell-into-Wednesday exit\n")
+    print("=== honest held-out: what the model's TOP picks actually returned, by tier ===")
+    print(f"{'tier':18} {'setups':>7} {'avg':>7} {'model top 20%':>14}")
+    for name, lo, hi in [("cheap  (<5k)", 0, 5000), ("mid    (5-40k)", 5000, 40000),
+                         ("premium(40-150k)", 40000, 150000), ("elite  (150k+)", 150000, 9e9)]:
+        mask = (pent >= lo) & (pent < hi)
+        if mask.sum() < 8:
+            print(f"{name:18} {int(mask.sum()):>7}  (too few to judge)")
+            continue
+        a, p = act[mask], pred[mask]
+        k = max(1, int(len(p) * 0.20))
+        top = a[np.argsort(p)[::-1][:k]]
+        print(f"{name:18} {int(mask.sum()):>7} {a.mean()*100:>+6.1f}% {top.mean()*100:>+13.1f}%")
+
+    reg.fit(X, yv)
+    latest = _to_utc(m.execute("SELECT MAX(timestamp) FROM price_snapshots").fetchone()[0])
+    active = [r[0] for r in m.execute(
+        "SELECT DISTINCT player_id FROM price_snapshots WHERE source='futgg' "
+        "AND timestamp >= ?", ((latest - timedelta(days=3)).isoformat(),))]
+    tiers: dict[str, list] = {}
+    for pid in active:
+        if (liq.get(pid) or 0) < 3:                 # skip illiquid/unfillable cards
+            continue
+        ser = series(m, pid, latest - timedelta(days=20), latest)
+        price = _near([r for r in ser if r[0] >= latest - timedelta(days=1)], latest)
+        if not price:
+            continue
+        f = feats2(ser, latest, rating_of.get(pid), ev_days)
+        if f:
+            pr = reg.predict([f])[0]
+            tiers.setdefault(_tier(price), []).append((pr, pr * price, pid, price))
+
+    print("\n=== tips right now, every tier (buy the dip, sell into Wednesday) ===")
+    for name in ["cheap  (<5k)", "mid    (5-40k)", "premium(40-150k)", "elite  (150k+)"]:
+        rows = sorted(tiers.get(name, []), reverse=True)[:per_tier]
+        print(f"\n-- {name} --   pred%  coin_profit   price   upd/day  card")
+        for pr, coins, pid, price in rows:
+            nm = m.execute("SELECT name FROM card_meta WHERE player_id=?", (pid,)).fetchone()[0]
+            print(f"   {pr*100:>+5.1f}%  {coins:>10,.0f}  {price:>8,}  {liq.get(pid,0):>6.0f}   {nm}")
+
+
 if __name__ == "__main__":
-    train_profit()
+    advise()
