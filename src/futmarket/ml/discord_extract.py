@@ -237,23 +237,29 @@ CREATE INDEX IF NOT EXISTS idx_calls_author ON discord_calls(author);
 class Lane:
     """One (key, model) quota bucket, with its own cooldown and pacing."""
 
-    def __init__(self, key: str, kidx: int, model: str, per_call_delay: float):
+    def __init__(self, key: str, kidx: int, model: str, per_call_delay: float,
+                 persist: bool = False):
         self.key, self.kidx, self.model = key, kidx, model
         self.per_call_delay = per_call_delay
+        self.persist = persist  # paid lane: wait out 429s, never give up
         self.ready_at = 0.0    # monotonic time this lane may next be used
         self.fails = 0         # consecutive 429s -> longer cooldowns
-        self.dead = False      # daily quota exhausted; parked for this run
+        self.dead = False      # quota exhausted; parked for this run
         self.done = 0
 
     @property
     def name(self) -> str:
         return f"key{self.kidx}/{self.model.replace('gemini-', '')}"
 
-    def hit_limit(self):
+    def hit_limit(self, retry_after: float | None = None):
         self.fails += 1
-        # 60s, 2m, 5m, 10m ... then give up on this lane for the run.
+        if self.persist:
+            # paid credits: a 429 is transient -> back off (cap 60s) and retry forever.
+            self.ready_at = time.monotonic() + (retry_after or min(60, 5 * self.fails))
+            return
+        # free daily-capped key: 60s, 2m, 5m, 10m ... then give up for the run.
         backoff = [60, 120, 300, 600][min(self.fails - 1, 3)]
-        self.ready_at = time.monotonic() + backoff
+        self.ready_at = time.monotonic() + (retry_after or backoff)
         if self.fails >= 5:
             self.dead = True
 
@@ -308,7 +314,8 @@ def run_full(db_path: Path, per_call_delay: float = 6.0, log_every: int = 25,
         keys, models, call_fn = [load_openrouter_key()], OR_MODELS, extract_one_openrouter
     else:
         keys, models, call_fn = load_keys(), MODELS, extract_one
-    lanes = [Lane(k, i + 1, m, per_call_delay)
+    persist = provider == "openrouter"   # paid lane: ride out transient 429s
+    lanes = [Lane(k, i + 1, m, per_call_delay, persist=persist)
              for i, k in enumerate(keys) for m in models]
     conn = sqlite3.connect(db_path)
     conn.executescript(TABLES)
@@ -328,6 +335,7 @@ def run_full(db_path: Path, per_call_delay: float = 6.0, log_every: int = 25,
     with httpx.Client() as client:
         for row in pending:
             r = dict(row)
+            attempts = 0
             while True:
                 lane = _acquire(lanes)
                 if lane is None:
@@ -344,18 +352,20 @@ def run_full(db_path: Path, per_call_delay: float = 6.0, log_every: int = 25,
                     break
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code == 429:
-                        lane.hit_limit()
+                        ra = e.response.headers.get("retry-after")
+                        lane.hit_limit(float(ra) if ra else None)
                         continue  # same message, next lane
                     _store(conn, r, None, lane.model, f"http{e.response.status_code}")
                     lane.ok()
                     done += 1
                     break
-                except Exception as e:  # noqa: BLE001 - network/parse; retry once via loop
-                    lane.fails += 1
-                    lane.ready_at = time.monotonic() + 10
-                    if lane.fails >= 5:
+                except Exception as e:  # noqa: BLE001 - network/parse blip
+                    # Retry THIS message a few times; then record + skip it.
+                    # Never kill the lane on a transient/parse error.
+                    attempts += 1
+                    lane.ready_at = time.monotonic() + 5
+                    if attempts >= 5:
                         _store(conn, r, None, lane.model, f"{type(e).__name__}")
-                        lane.dead = True
                         done += 1
                         break
             if done % log_every == 0:
@@ -370,7 +380,7 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "run":
         provider = sys.argv[2] if len(sys.argv) > 2 else "gemini"
-        default_delay = 0.6 if provider == "openrouter" else 6.0
+        default_delay = 1.2 if provider == "openrouter" else 6.0
         delay = float(sys.argv[3]) if len(sys.argv) > 3 else default_delay
         run_full(ROOT / "data" / "discord.db", per_call_delay=delay, provider=provider)
     else:  # sample mode: `python -m ... [n]`
