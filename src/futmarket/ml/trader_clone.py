@@ -23,7 +23,11 @@ import numpy as np
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
-from futmarket.ml.discord_scorecard import build_index, resolve, series, _to_utc, ROOT
+from futmarket.ml.discord_scorecard import (build_index, resolve, series, _near,
+                                            _entry, _to_utc, ROOT)
+
+BUY_PREMIUM = 1.04   # you pay ~4% over the listing
+SELL_TAX = 0.95      # EA takes 5% on the sale
 
 FEAT_NAMES = ["log_price", "ret_1d", "ret_3d", "ret_7d", "range_pos_14",
               "drawdown_14", "vol_14", "rating", "day_of_week"]
@@ -133,5 +137,104 @@ def train_and_pick(top=20):
     return clf, rows
 
 
+def feats2(ser, asof, rating, ev_days):
+    """Richer market-state features, incl. distance to the nearest promo event."""
+    base = feats(ser, asof, rating)
+    if base is None:
+        return None
+    hist = [(t, p) for t, p in ser if t <= asof and p > 0]
+    price = hist[-1][1]
+    lo30 = min((p for t, p in hist if t >= asof - timedelta(days=30)), default=price)
+    dist_lo = price / lo30 - 1 if lo30 > 0 else 0.0            # >0 = above its floor
+    r14 = price / next((p for t, p in reversed(hist)
+                        if t <= asof - timedelta(days=14)), price) - 1
+    fut = [ (e - asof.date()).days for e in ev_days if e >= asof.date() ]
+    past = [ (asof.date() - e).days for e in ev_days if e <= asof.date() ]
+    to_next = min(fut) if fut else 30
+    since_last = min(past) if past else 30
+    return base + [dist_lo, r14, to_next, since_last]
+
+
+def realized_net(m, pid, when, call, hold=3):
+    """Honest round-trip: fill on the buy, sell `hold` days later, all fees in."""
+    ser = series(m, pid, when - timedelta(days=2), when + timedelta(days=hold + 2))
+    entry, ft = _entry(ser, when, call)
+    if not entry:
+        return None
+    ex = _near(ser, ft + timedelta(days=hold))
+    if not ex:
+        return None
+    return (ex * SELL_TAX) / (entry * BUY_PREMIUM) - 1
+
+
+def train_profit(top=20, hold=3, min_price=5000, max_price=80000):
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    m = sqlite3.connect(ROOT / "data" / "market.db")
+    d = sqlite3.connect(ROOT / "data" / "discord.db")
+    idx = build_index(m)
+    rating_of = dict(m.execute("SELECT player_id, rating FROM card_meta"))
+    ev_days = sorted({_to_utc(f"{r[0]}T00:00:00Z").date()
+                      for r in m.execute("SELECT start_date FROM market_events")})
+    print(f"(fillable mid-tier only: {min_price:,}-{max_price:,} coins)")
+
+    X, yv, dates = [], [], []
+    for row in d.execute("SELECT card, version, price, price_kind, timestamp "
+                         "FROM discord_calls WHERE action='buy'"):
+        call = dict(zip(["card", "version", "price", "price_kind", "timestamp"], row))
+        pid = resolve(m, idx, call)
+        if not pid:
+            continue
+        when = _to_utc(call["timestamp"])
+        ser = series(m, pid, when - timedelta(days=20), when + timedelta(days=hold + 2))
+        px = _near([r for r in ser if r[0] <= when], when)
+        if not px or not (min_price <= px <= max_price):   # fillable tier only
+            continue
+        f = feats2(ser, when, rating_of.get(pid), ev_days)
+        r = realized_net(m, pid, when, call, hold)
+        if f and r is not None:
+            X.append(f); yv.append(r); dates.append(when)
+    X, yv = np.array(X), np.array(yv)
+    order = np.argsort([dt.timestamp() for dt in dates])
+    X, yv = X[order], yv[order]
+    cut = int(len(yv) * 0.75)
+    print(f"trader buy setups with a known outcome: {len(yv)} | "
+          f"baseline: on average these returned {yv.mean()*100:+.1f}% net over {hold}d")
+
+    reg = HistGradientBoostingRegressor(max_iter=400, learning_rate=0.05,
+                                        max_depth=4, random_state=0)
+    reg.fit(X[:cut], yv[:cut])
+    pred = reg.predict(X[cut:])
+    act = yv[cut:]
+    # THE honest test: take the calls the model liked most on held-out data,
+    # and see what they ACTUALLY returned.
+    for frac, label in [(0.10, "top 10%"), (0.25, "top 25%")]:
+        k = max(1, int(len(pred) * frac))
+        picked = act[np.argsort(pred)[::-1][:k]]
+        print(f"  held-out {label} the model picked -> actually returned "
+              f"{picked.mean()*100:+.1f}% net (vs {act.mean()*100:+.1f}% for all)")
+
+    reg.fit(X, yv)
+    latest = _to_utc(m.execute("SELECT MAX(timestamp) FROM price_snapshots").fetchone()[0])
+    active = [r[0] for r in m.execute(
+        "SELECT DISTINCT player_id FROM price_snapshots WHERE source='futgg' "
+        "AND timestamp >= ?", ((latest - timedelta(days=3)).isoformat(),))]
+    picks = []
+    for pid in active:
+        ser = series(m, pid, latest - timedelta(days=20), latest)
+        price = _near([r for r in ser if r[0] >= latest - timedelta(days=1)], latest)
+        if not price or not (min_price <= price <= max_price):   # fillable tier only
+            continue
+        f = feats2(ser, latest, rating_of.get(pid), ev_days)
+        if f:
+            picks.append((reg.predict([f])[0], pid, price))
+    picks.sort(reverse=True)
+    print(f"\n=== model's most PROFITABLE-looking buys right now (predicted {hold}d net) ===")
+    print(f"{'pred':>6}  {'price':>8}  card")
+    for pr, pid, price in picks[:top]:
+        name, url = m.execute("SELECT name, url FROM card_meta WHERE player_id=?",
+                              (pid,)).fetchone()
+        print(f"{pr*100:>+5.1f}%  {price or 0:>8,}  {name}  {url or ''}")
+
+
 if __name__ == "__main__":
-    train_and_pick()
+    train_profit()
