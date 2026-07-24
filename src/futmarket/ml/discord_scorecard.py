@@ -179,6 +179,69 @@ def scoreboard(graded, horizon=3, min_calls=8):
     return rows
 
 
+def round_trips(db=ROOT / "data" / "discord.db", market=ROOT / "data" / "market.db",
+                max_hold_days=30):
+    """Pair each BUY with the same caller's next SELL on the same card -> a real
+    round-trip graded at the price when they said to sell (net of tax)."""
+    d = sqlite3.connect(db); d.row_factory = sqlite3.Row
+    m = sqlite3.connect(market)
+    idx = build_index(m)
+
+    events: dict[str, list[dict]] = {}
+    for row in d.execute("SELECT author, card, version, price, price_kind, action, "
+                         "timestamp FROM discord_calls WHERE action IN ('buy','sell') "
+                         "ORDER BY timestamp"):
+        call = dict(row)
+        pid = resolve(m, idx, call)
+        if not pid:
+            continue
+        call["pid"] = pid
+        call["when"] = _to_utc(call["timestamp"])
+        events.setdefault(call["author"], []).append(call)
+
+    trips = []
+    for author, evs in events.items():
+        for i, e in enumerate(evs):
+            if e["action"] != "buy":
+                continue
+            sell = next((f for f in evs[i + 1:]
+                         if f["action"] == "sell" and f["pid"] == e["pid"]
+                         and f["when"] <= e["when"] + timedelta(days=max_hold_days)), None)
+            if not sell:
+                continue
+            ser = series(m, e["pid"], e["when"] - timedelta(days=2),
+                         sell["when"] + timedelta(days=2))
+            entry, ft = _entry(ser, e["when"], e)
+            if not entry or ft > sell["when"]:
+                continue
+            exitp = _near([r for r in ser if r[0] <= sell["when"] + timedelta(days=1)],
+                          sell["when"])
+            if not exitp:
+                continue
+            trips.append({"author": author, "card": e["card"], "entry": entry,
+                          "exit": exitp, "net": (exitp * (1 - TAX) - entry) / entry,
+                          "hold": (sell["when"] - ft).days})
+    print(f"closed round-trips (buy+sell, same caller, same card): {len(trips)}")
+    return trips
+
+
+def rt_scoreboard(trips, min_trips=6):
+    by: dict[str, list[dict]] = {}
+    for t in trips:
+        by.setdefault(t["author"], []).append(t)
+    rows = []
+    for a, ts in by.items():
+        if len(ts) < min_trips:
+            continue
+        nets = [t["net"] for t in ts]
+        rows.append({"caller": a, "trips": len(ts),
+                     "median": statistics.median(nets), "mean": statistics.fmean(nets),
+                     "win": sum(n > 0 for n in nets) / len(nets),
+                     "hold": statistics.median(t["hold"] for t in ts)})
+    rows.sort(key=lambda r: r["median"], reverse=True)
+    return rows
+
+
 if __name__ == "__main__":
     g = grade()
     all_r = [x["r3"] for x in g if x.get("r3") is not None]
