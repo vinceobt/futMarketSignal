@@ -37,22 +37,25 @@ def _weekly_svg(weekly) -> str:
     if not weekly:
         return '<p class="empty">No price history yet.</p>'
     mx = max(abs(x["ret"]) for x in weekly) or 1
-    bw, gap, h, mid = 54, 14, 120, 60
+    # Fixed rows so labels never collide: value labels sit in reserved bands
+    # above (positive) / below (negative) the bars; day labels get their own row.
+    bw, gap = 54, 14
+    top_lab, mid, maxbar, neg_lab, day_row, h = 16, 74, 44, 134, 158, 168
     width = 7 * (bw + gap) - gap
     parts = [f'<line class="axis" x1="0" y1="{mid}" x2="{width}" y2="{mid}"/>']
     for i, x in enumerate(weekly):
         v = x["ret"]
-        bar = abs(v) / mx * 52
+        bar = abs(v) / mx * maxbar
         y = mid - bar if v >= 0 else mid
         col = "var(--up)" if v >= 0 else "var(--down)"
         xx = i * (bw + gap)
-        lab_y = y - 8 if v >= 0 else y + bar + 16
+        lab_y = top_lab if v >= 0 else neg_lab   # aligned bands, clear of bars + days
         parts.append(
             f'<g class="bar"><rect x="{xx}" y="{y:.1f}" width="{bw}" '
             f'height="{max(bar,1.5):.1f}" rx="4" fill="{col}">'
             f'<title>{x["day"]}: {v:+.2f}% over {x["n"]:,} moves</title></rect>'
-            f'<text class="v" x="{xx+bw/2}" y="{lab_y:.1f}">{v:+.2f}%</text>'
-            f'<text class="d" x="{xx+bw/2}" y="{h-4}">{x["day"]}</text></g>')
+            f'<text class="v" x="{xx+bw/2}" y="{lab_y}">{v:+.2f}%</text>'
+            f'<text class="d" x="{xx+bw/2}" y="{day_row}">{x["day"]}</text></g>')
     return (f'<svg viewBox="0 0 {width} {h}" role="img" '
             f'aria-label="Average price move by weekday">{"".join(parts)}</svg>')
 

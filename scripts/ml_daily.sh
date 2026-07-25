@@ -46,6 +46,14 @@ run_step() {
 }
 
 echo "[$(stamp)] --- ml cycle start ---" >>"$LOG"
+# New promo cards: refresh the registry ~once a day (full crawl is heavy), then
+# rescore liquidity so new cards become tradeable/consultable.
+REG_MARK="$REPO/data/.last_registry"
+if [ ! -f "$REG_MARK" ] || [ -n "$(find "$REG_MARK" -mmin +1200 2>/dev/null)" ]; then
+  run_step "build-registry"  "$FUT" build-registry
+  run_step "score-liquidity" "$FUT" score-liquidity
+  touch "$REG_MARK"
+fi
 # Prices first: everything downstream is worthless without fresh snapshots.
 run_step "collect-bulk" "$FUT" collect-bulk
 run_step "picks"        "$FUT" picks --limit "$PICKS_LIMIT" \
