@@ -325,6 +325,23 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # When a "sell now" alert was sent for a held pick, so it only fires once.
     if "alerted_at" not in _column_names(conn, "pick_log"):
         conn.execute("ALTER TABLE pick_log ADD COLUMN alerted_at DATETIME")
+    # What the market did over the same window, and how long the trade was given.
+    # Without a benchmark a track record cannot distinguish a good call in a bad
+    # month from a bad call, and in this market the median tradeable card doesn't
+    # move at all -- the round trip is the whole obstacle.
+    for col, decl in (("benchmark_pct", "REAL"),
+                      ("chosen_horizon_days", "INTEGER"),
+                      ("market_price", "INTEGER")):
+        if col not in _column_names(conn, "pick_log"):
+            conn.execute(f"ALTER TABLE pick_log ADD COLUMN {col} {decl}")
+    # The dip_v1 picks were graded under a broken convention: the stop was
+    # derived from a marked-up entry but compared against the raw price series,
+    # so it landed on average 0.76% ABOVE the market price at pick time and 90%
+    # of trades stopped out before they began. Those rows are kept for reference
+    # but must never appear in a headline -- re-tag them once, by name.
+    if conn.execute("SELECT 1 FROM pick_log WHERE strategy='dip_v1' LIMIT 1").fetchone():
+        conn.execute("UPDATE pick_log SET strategy='dip_v1_broken' "
+                     "WHERE strategy='dip_v1'")
     conn.commit()
 
 
@@ -546,6 +563,50 @@ def history(conn: sqlite3.Connection, player_id: str, limit: int = 50) -> list[s
         "WHERE player_id=? ORDER BY timestamp DESC LIMIT ?",
         (player_id, limit),
     ).fetchall()
+
+
+DAILY_OUTLIER_FACTOR = 3.0
+
+
+def daily_prices(conn: sqlite3.Connection, player_id: str,
+                 source: str = "futgg",
+                 outlier_factor: float = DAILY_OUTLIER_FACTOR
+                 ) -> list[tuple[str, int, int]]:
+    """One robust price per day — (date, price, n_snapshots), ascending.
+
+    Grading a trade against every raw tick is what broke the old track record.
+    The recorded price is the cheapest live listing at a moment in time, and the
+    median card-day *ranges 14.3%* -- so a stop placed anywhere near the price
+    gets touched by sampling jitter alone, not by the market. Worse, the training
+    labels were computed on daily prices while scoring walked intraday ticks, so
+    the model was graded on a harder question than it was ever taught. Both ends
+    now read this same series, built the same way as
+    ``ml.dataset.load_daily_prices``: drop the bad prints, then take the median.
+
+    (The aggregation is done here rather than in SQL because SQLite has no median
+    and the mean is exactly what we are trying to get away from.)
+    """
+    from statistics import median
+
+    rows = conn.execute(
+        """SELECT substr(timestamp, 1, 10) AS date, price
+           FROM price_snapshots
+           WHERE player_id=? AND source=? AND price>0
+           ORDER BY timestamp""",
+        (player_id, source)).fetchall()
+
+    by_day: dict[str, list[int]] = {}
+    for row in rows:
+        by_day.setdefault(row["date"], []).append(int(row["price"]))
+
+    out = []
+    for date in sorted(by_day):
+        prices = by_day[date]
+        rough = median(prices)
+        kept = [p for p in prices
+                if rough / outlier_factor <= p <= rough * outlier_factor]
+        out.append((date, int(round(median(kept or prices))), len(prices)))
+    return out
 
 
 def snapshots(conn: sqlite3.Connection, player_id: str,
@@ -832,16 +893,20 @@ def insert_pick(conn: sqlite3.Connection, *, player_id: str, entry_price: int,
                 at: datetime, title: str = "fc26", run_id: int | None = None,
                 confidence: float | None = None, buy_low: int | None = None,
                 buy_high: int | None = None, sales_per_hour: float | None = None,
-                reasons: str | None = None, strategy: str = "legacy") -> bool:
+                reasons: str | None = None, strategy: str = "legacy",
+                market_price: int | None = None,
+                chosen_horizon_days: int | None = None) -> bool:
     """Record a recommendation. False if this card was already picked this minute."""
     cur = conn.execute(
         """INSERT OR IGNORE INTO pick_log (player_id, title, picked_at, run_id,
              confidence, entry_price, buy_low, buy_high, target_price, stop_price,
-             horizon_days, sales_per_hour, reasons, strategy)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             horizon_days, sales_per_hour, reasons, strategy, market_price,
+             chosen_horizon_days)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (player_id, title, bucket_timestamp(at), run_id, confidence,
          int(entry_price), buy_low, buy_high, int(target_price), int(stop_price),
-         int(horizon_days), sales_per_hour, reasons, strategy),
+         int(horizon_days), sales_per_hour, reasons, strategy, market_price,
+         chosen_horizon_days or int(horizon_days)),
     )
     return cur.rowcount == 1
 
@@ -850,6 +915,24 @@ def open_picks(conn: sqlite3.Connection, *, title: str = "fc26") -> list[sqlite3
     return conn.execute(
         "SELECT * FROM pick_log WHERE status='open' AND title=? ORDER BY picked_at",
         (title,)).fetchall()
+
+
+def has_open_pick(conn: sqlite3.Connection, player_id: str, *,
+                  title: str = "fc26", strategy: str | None = None) -> bool:
+    """Is this card already held?
+
+    The loop runs every two hours and re-derives the same shortlist each time, so
+    without this a single opportunity was recorded as a dozen separate trades:
+    92 picks over 37 distinct cards, the same card simultaneously 'open' and
+    'stop'. One position per card is both the honest accounting and the real
+    trade -- you only buy it once.
+    """
+    sql = "SELECT 1 FROM pick_log WHERE player_id=? AND title=? AND status='open'"
+    params: list = [player_id, title]
+    if strategy is not None:
+        sql += " AND strategy=?"
+        params.append(strategy)
+    return conn.execute(sql + " LIMIT 1", tuple(params)).fetchone() is not None
 
 
 def latest_price(conn: sqlite3.Connection, player_id: str,
@@ -870,11 +953,12 @@ def mark_pick_alerted(conn: sqlite3.Connection, pick_id: int,
 
 def close_pick(conn: sqlite3.Connection, pick_id: int, *, status: str,
                exit_price: int, realized_pct: float,
+               benchmark_pct: float | None = None,
                at: datetime | None = None) -> None:
     conn.execute(
-        "UPDATE pick_log SET status=?, exit_price=?, realized_pct=?, scored_at=? "
-        "WHERE id=?",
-        (status, int(exit_price), realized_pct,
+        "UPDATE pick_log SET status=?, exit_price=?, realized_pct=?, "
+        "benchmark_pct=?, scored_at=? WHERE id=?",
+        (status, int(exit_price), realized_pct, benchmark_pct,
          bucket_timestamp(at or datetime.now(timezone.utc)), pick_id))
 
 

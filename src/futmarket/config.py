@@ -52,20 +52,28 @@ class Config:
     log_path: Path
     tax_rate: float             # EA transfer-market sell tax
     sell_slippage_pct: float    # selling under the going rate to actually get filled
-    horizon_days: int           # how long a trade is given to work
-    # The trade, from measured edge: buy a cheap/mid card ON THE DIP (oversold,
-    # near its own floor), sell into its resistance. Backtest: cheap+mid fodder
-    # bought oversold returns +5-11% on capital net of tax; expensive icons are
-    # priced efficiently and lose, so they're excluded by max_price.
+    buy_premium_pct: float      # paying over the cheapest listing to actually get filled
+    horizon_days: int           # default holding period; the model picks per trade
+    # The trade, from measured edge: buy a cheap/mid card on a DEEP dip and give
+    # it long enough to come back. Measured month by month on tradeable cards:
+    # the old shallow gate at 5 days nets -2.85%; this one at 14 days nets +4.14%
+    # and beats the market in 10 of 11 months.
     min_price: int              # ignore near-discard noise below this
     max_price: int              # ignore efficiently-priced cards above this
-    entry_z_max: float          # only buy when this many sigma below normal (the dip)
-    entry_floor_max_pct: float  # only buy within this % of the card's own 30-day low
+    # NOTE: the entry gates themselves are NOT config. They live in
+    # ``ml.evaluate.GATES``, which is also what the backtest measures, so what we
+    # trade and what we claim to have measured cannot drift apart. A gate change
+    # is a strategy change: it has to clear `futmarket evaluate` in 8+ of 11
+    # months before it ships, which is not something a YAML edit should do
+    # silently.
     # Per-card stop: just below the card's support, with room for noise and a cap.
+    # The floor must stay outside the card's own daily jitter -- a 5% stop was
+    # inside it, and 90% of trades were stopped out before they began.
     stop_buffer_pct: float
     stop_min_pct: float
     stop_max_pct: float
     min_reward_risk: float      # skip trades whose upside isn't worth the downside
+    min_expected_net_pct: float  # don't trade unless the model expects this, after costs
 
 
 def load_config(path: str | Path) -> Config:
@@ -90,13 +98,13 @@ def load_config(path: str | Path) -> Config:
         log_path=base / raw.get("log_path", "data/collector.log"),
         tax_rate=float(raw.get("tax_rate", 0.05)),
         sell_slippage_pct=float(raw.get("sell_slippage_pct", 2.0)),
-        horizon_days=int(raw.get("horizon_days", 5)),
+        buy_premium_pct=float(raw.get("buy_premium_pct", 0.0)),
+        horizon_days=int(raw.get("horizon_days", 14)),
         min_price=int(raw.get("min_price", 1000)),
         max_price=int(raw.get("max_price", 40000)),
-        entry_z_max=float(raw.get("entry_z_max", -0.5)),
-        entry_floor_max_pct=float(raw.get("entry_floor_max_pct", 5.0)),
-        stop_buffer_pct=float(raw.get("stop_buffer_pct", 2.0)),
-        stop_min_pct=float(raw.get("stop_min_pct", 5.0)),
-        stop_max_pct=float(raw.get("stop_max_pct", 18.0)),
-        min_reward_risk=float(raw.get("min_reward_risk", 1.0)),
+        stop_buffer_pct=float(raw.get("stop_buffer_pct", 3.0)),
+        stop_min_pct=float(raw.get("stop_min_pct", 15.0)),
+        stop_max_pct=float(raw.get("stop_max_pct", 30.0)),
+        min_reward_risk=float(raw.get("min_reward_risk", 0.5)),
+        min_expected_net_pct=float(raw.get("min_expected_net_pct", 3.0)),
     )

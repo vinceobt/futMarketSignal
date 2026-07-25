@@ -48,6 +48,15 @@ run_step() {
 echo "[$(stamp)] --- ml cycle start ---" >>"$LOG"
 # New promo cards: refresh the registry ~once a day (full crawl is heavy), then
 # rescore liquidity so new cards become tradeable/consultable.
+# NEW CARDS, EVERY CYCLE. This is not optional housekeeping: the release trade
+# buys a promo card on day 4-6 of its crash, so a card that isn't in the registry
+# within a day or two can never be traded in its best window. It has already gone
+# wrong once -- cards released 19-24 Jul got their first price snapshot on the
+# 25th, and every one of those release windows was missed. The first pages of
+# fut.gg's list are the newest cards, so this is 4 requests, not a full crawl.
+run_step "new-cards" "$FUT" build-registry --max-pages 4
+# The full crawl is heavy, so it stays daily; it also rescores liquidity so new
+# cards become tradeable and consultable.
 REG_MARK="$REPO/data/.last_registry"
 if [ ! -f "$REG_MARK" ] || [ -n "$(find "$REG_MARK" -mmin +1200 2>/dev/null)" ]; then
   run_step "build-registry"  "$FUT" build-registry
@@ -56,6 +65,18 @@ if [ ! -f "$REG_MARK" ] || [ -n "$(find "$REG_MARK" -mmin +1200 2>/dev/null)" ];
 fi
 # Prices first: everything downstream is worthless without fresh snapshots.
 run_step "collect-bulk" "$FUT" collect-bulk
+# Real completed sales for the most tradeable cards. Two jobs at once: it keeps
+# the buy bands honest, and it banks the 'futgg_sold' price series -- actual
+# transactions rather than the cheapest listing, whose day-to-day return std is
+# 193% against 41% for a robust daily median. Each fetch returns ~100 sales
+# spanning most of a day, so a slice per cycle accumulates real history fast.
+# Capped so a cycle stays well under the 2h interval.
+# Stalest cards first, so each cycle advances coverage instead of re-fetching the
+# same head of the list. 250 at 2s is ~8 minutes of the 2h window and ~3k cards a
+# day: the whole tradeable universe inside three days, then continuous refresh.
+# Sized deliberately below what trips fut.gg's limiter -- a continuous 8k sweep
+# stalled at ~600 cards behind escalating backoff and banked nothing further.
+run_step "sale-stats"   "$FUT" sale-stats --tiers AB --limit 250 --delay 2.0
 run_step "picks"        "$FUT" picks --limit "$PICKS_LIMIT" \
                                      --min-sales-per-hour "$MIN_SALES" --save
 # Sell side: ping to sell any held pick that reached its target before grading it.

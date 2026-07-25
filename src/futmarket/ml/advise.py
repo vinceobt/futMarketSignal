@@ -40,20 +40,37 @@ def _norm(text: str) -> str:
 
 # --------------------------------------------------------------- scored frame
 
-def _build_scored(conn, *, source: str, title: str) -> pd.DataFrame:
-    """Latest features per card, scored by the trained direction model."""
+CONSULT_HORIZON = 14        # the hold the consult's verdict assumes
+
+
+def _build_scored(conn, *, source: str, title: str,
+                  horizon: int = CONSULT_HORIZON) -> pd.DataFrame:
+    """Latest features per card, scored for "will this beat the market and pay?".
+
+    ``confidence`` here is the clears-cost probability at the default holding
+    period, so a consult and a pick are answering the same question. It used to
+    be the old direction head's probability of touching a target first, which is
+    not the same thing and not the thing that pays.
+    """
     frame = dataset.build_dataset(conn, source=source, title=title)
     if frame.empty:
         return frame
     latest = (frame.sort_values("date").groupby("player_id", observed=True)
               .tail(1).copy())
-    artifact, _ = picks._load_latest_model(conn, title=title)
+    artifact, _ = picks._load_latest_model(conn, kind="clears", title=title)
     if artifact is None:
         raise RuntimeError("no trained model — run `futmarket train` first")
-    cols = artifact["features"]
-    for c in [c for c in cols if c not in latest.columns]:
+    horizon = horizon if horizon in artifact["models"] else next(
+        iter(artifact["models"]), None)
+    if horizon is None:
+        raise RuntimeError("trained model has no usable horizon — retrain")
+    model = artifact["models"][horizon]
+    for c in [c for c in artifact["features"] if c not in latest.columns]:
         latest[c] = np.nan
-    latest["confidence"] = artifact["model"].predict_proba(latest[cols])[:, 1]
+    # Exactly the columns this model was fitted on: a feature that was constant
+    # at fit time was dropped, and the estimator will not accept it back.
+    cols = (artifact.get("feature_sets") or {}).get(horizon) or artifact["features"]
+    latest["confidence"] = model.predict_proba(latest[cols])[:, 1]
     return latest
 
 
@@ -91,17 +108,29 @@ def card_read(row: pd.Series, *, tax_rate: float = 0.05) -> dict:
     conf = float(row.get("confidence") or 0.0)
     expensive = price > EXPENSIVE_PRICE
 
+    # Two thresholds, deliberately. A shallow dip is worth *describing* -- it is
+    # what the card is doing -- but only a deep one is worth buying: measured
+    # over the season, z <= -0.5 nets -2.85% after costs and z <= -1.5 nets
+    # +4.14%. Saying "on a dip" and saying "buy" are not the same claim.
     on_dip = (pd.notna(z) and z <= -0.5) and (pd.notna(floor) and 0 <= floor <= 5)
-    target, stop, rr = picks._barriers(price, ceil, floor, tax_rate=tax_rate)
+    deep_dip = ((pd.notna(z) and z <= picks.ENTRY_Z_MAX)
+                and (pd.notna(floor) and 0 <= floor <= picks.ENTRY_FLOOR_MAX_PCT))
+    # A consult has no buy band, so the price you'd pay is the market price.
+    target, stop, rr = picks._barriers(price, price, ceil, floor, tax_rate=tax_rate)
 
     if pd.notna(floor) and floor < 0:
         verdict = "AVOID"
         headline = (f"trading {abs(floor):.0f}% below its own 30-day low — a "
                     f"falling knife, not a dip. Wait for it to stop dropping.")
-    elif on_dip and conf >= 0.5 and rr >= 1.0 and not expensive:
+    elif deep_dip and conf >= 0.5 and rr >= picks.MIN_REWARD_RISK and not expensive:
         verdict = "BUY"
-        headline = (f"on the dip and the model likes it ({conf:.0%} it bounces "
-                    f"first) — buy near {price:,}, sell into ~{target:,}.")
+        headline = (f"deep on the dip and the model likes it ({conf:.0%} it "
+                    f"beats the market) — buy near {price:,}, sell into "
+                    f"~{target:,}, give it about two weeks.")
+    elif on_dip and not deep_dip:
+        verdict = "WATCH"
+        headline = (f"on a dip, but a shallow one — that trade loses money after "
+                    f"the 7.4% round trip. Wait for a proper dislocation.")
     elif on_dip and expensive:
         verdict = "WATCH"
         headline = (f"on a dip, but at {price:,} it's an expensive card — icons "

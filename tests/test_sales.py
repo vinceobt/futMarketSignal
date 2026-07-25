@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 
 from futmarket import db as futdb
+from futmarket.collectors.base import SourceError
 from futmarket.services import sales
 
 UTC = timezone.utc
@@ -119,3 +120,86 @@ def test_recent_slice_prefers_the_time_window():
     newest = max(t for t, _ in dense)
     assert all((newest - t).total_seconds() / 3600 <= sales.RECENT_HOURS
                for t, _ in recent)
+
+
+# ---- banking real transactions as a price series --------------------------
+
+def test_sold_prices_are_banked_as_their_own_series(conn):
+    """The listing index is one number set by whoever is currently most
+    desperate; its day-to-day return std is 193%. Completed sales are what the
+    market actually agreed on, so they are banked as a series in their own right
+    and accumulate into a second, cleaner price history."""
+    from datetime import datetime, timezone
+    from futmarket.services import sales as sales_service
+
+    hour = datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc)
+    trades = [(hour.replace(minute=m), p)
+              for m, p in ((5, 10_000), (20, 10_400), (50, 40_000))]
+    stored = sales_service.bank_sold_prices(conn, "c1", trades)
+    conn.commit()
+
+    assert stored == 1                      # one hour, one banked point
+    rows = futdb.snapshots(conn, "c1", sales_service.SOLD_SOURCE)
+    # the hourly MEDIAN, so a single panic sale can't set the going rate
+    assert [r["price"] for r in rows] == [10_400]
+
+
+def test_banking_the_same_sales_twice_is_idempotent(conn):
+    """Sweeps overlap — the feed returns the last ~100 sales every time."""
+    from datetime import datetime, timezone
+    from futmarket.services import sales as sales_service
+
+    hour = datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc)
+    trades = [(hour, 10_000), (hour.replace(hour=15), 11_000)]
+    sales_service.bank_sold_prices(conn, "c1", trades)
+    sales_service.bank_sold_prices(conn, "c1", trades)
+    conn.commit()
+    assert len(futdb.snapshots(conn, "c1", sales_service.SOLD_SOURCE)) == 2
+
+
+def test_banking_ignores_junk_prices(conn):
+    from datetime import datetime, timezone
+    from futmarket.services import sales as sales_service
+
+    hour = datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc)
+    assert sales_service.bank_sold_prices(conn, "c1", [(hour, 0)]) == 0
+    assert sales_service.bank_sold_prices(conn, "c1", []) == 0
+
+
+def test_the_stalest_cards_are_fetched_first(conn, monkeypatch):
+    """A capped run must advance coverage, not re-fetch the same head of the list.
+
+    Ordering by liquidity meant `--limit 250` fetched the same 250 cards every
+    cycle forever, so sale history could never grow past the most liquid cards —
+    fine for keeping a buy band fresh, useless for building a price series.
+    """
+    from datetime import datetime, timezone
+    from futmarket.services import sales as sales_service
+
+    for defn, (pid, score) in enumerate((("fresh", 9.0), ("stale", 8.0),
+                                         ("never", 1.0)), start=1):
+        futdb.upsert_card_meta(conn, {"player_id": pid, "name": pid,
+                                      "definition_id": defn, "tradeable": 1})
+        futdb.upsert_liquidity(conn, player_id=pid, score=score, tier="A")
+    # "fresh" was just refreshed, "stale" long ago, "never" has no row at all
+    for pid, when in (("fresh", "2026-07-25T12:00:00Z"), ("stale", "2026-01-01T12:00:00Z")):
+        futdb.upsert_sale_stats(conn, player_id=pid, n_sales=10, sales_per_hour=5.0)
+        conn.execute("UPDATE sale_stats SET computed_at=? WHERE player_id=?", (when, pid))
+    conn.commit()
+
+    seen = []
+    from futmarket.collectors import history_source
+
+    def spy(definition_id, game, client=None):
+        # record which card we were asked for, in order
+        row = conn.execute("SELECT player_id FROM card_meta WHERE definition_id=?",
+                           (definition_id,)).fetchone()
+        seen.append(row["player_id"] if row else "?")
+        raise SourceError("no network in tests")
+
+    monkeypatch.setattr(history_source, "fetch_card_detail", spy)
+    sales_service.refresh_sale_stats(conn, delay=0, retries=0,
+                                     max_consecutive_failures=99)
+    # never-fetched first, then the oldest refresh, and only then the fresh one
+    assert seen[0] == "never"
+    assert seen.index("stale") < seen.index("fresh")

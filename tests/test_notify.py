@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 
 from futmarket import db as futdb
+from futmarket.ml import picks
 from futmarket.services import notify
 
 UTC = timezone.utc
@@ -42,7 +43,7 @@ def test_summary_handles_a_quiet_run(conn):
 
 # ---- sell alerts ----------------------------------------------------------
 
-def _hold(conn, pid, *, target, stop, price, strategy="dip_v1"):
+def _hold(conn, pid, *, target, stop, price, strategy=picks.STRATEGY_VERSION):
     futdb.upsert_card_meta(conn, {"player_id": pid, "name": pid, "rating": 90})
     futdb.insert_pick(conn, player_id=pid, entry_price=10_000, target_price=target,
                       stop_price=stop, horizon_days=5, at=NOW, strategy=strategy)

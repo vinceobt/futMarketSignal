@@ -8,17 +8,38 @@ platform: console       # console | pc
 database_path: data/market.db
 log_path: data/collector.log
 
-# The trade: buy a cheap/mid card ON THE DIP (oversold, near its own floor),
-# sell into its resistance. Measured edge lives here — expensive icons are priced
-# efficiently and lose after tax, so max_price excludes them.
+# --- what a trade costs -----------------------------------------------------
+# Together these mean a trade must make +7.4% gross just to break even. That is
+# larger than the entire five-day dip bounce this system used to trade on, which
+# is why it could not have made money however good the model got.
 tax_rate: 0.05          # EA transfer-market sell tax (5%)
 sell_slippage_pct: 2.0  # sell a touch under the going rate to actually get filled
-horizon_days: 5         # days a trade is given to work
+buy_premium_pct: 0.0    # pay over the cheapest listing to get filled (0 = be patient)
+
+# --- the trades -------------------------------------------------------------
+# Two of them, near-disjoint, judged separately. Measured month by month on
+# tradeable cards net of all costs (`futmarket evaluate --gate all`):
+#
+#   release_v1  promo card 4-6 days into its crash, held ~21d
+#               median +11.5%, +25pp alpha, 10/10 months, tier A best (+35.6%)
+#   relval_v1   deep dip on its 30-day floor, held ~14d
+#               median  +4.1%, +20pp alpha, 10/11 months
+#   (for contrast, the shallow 5-day dip this system used to trade: -2.85%)
+#
+# The entry gates are deliberately NOT here -- they live in `ml.evaluate.GATES`,
+# which is also what the backtest measures, so what we trade and what we claim
+# can never drift apart. Changing a gate is a strategy change and has to clear
+# `futmarket evaluate` in 8+ of 11 months first.
+horizon_days: 14        # default hold; the model chooses per trade (3-21 days)
 min_price: 1000         # ignore near-discard noise
 max_price: 40000        # ignore efficiently-priced cards above this
-entry_z_max: -0.5       # only buy when this far below normal (the dip)
-entry_floor_max_pct: 5.0  # only buy within this % of the card's 30-day low
-stop_buffer_pct: 2.0    # stop sits this far below the card's support
-stop_min_pct: 5.0       # never tighter than this (noise room)
-stop_max_pct: 18.0      # never risk more than this
-min_reward_risk: 1.0    # skip trades whose upside isn't worth the downside
+
+# --- where the exits sit ----------------------------------------------------
+# The stop must sit OUTSIDE the card's own noise. The median card-day ranges
+# 14.3%, so the old 5% floor was a coin-flip on jitter: 90% of trades stopped out
+# before they began. Stops are levels on the same price series that grades them.
+stop_buffer_pct: 3.0    # stop sits this far below the card's support
+stop_min_pct: 15.0      # never tighter than this (noise room)
+stop_max_pct: 30.0      # never risk more than this
+min_reward_risk: 0.5    # reject only lopsided setups; expected value is the real gate
+min_expected_net_pct: 3.0  # don't trade unless the model expects this much, after costs

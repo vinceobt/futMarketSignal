@@ -13,6 +13,7 @@ Learn + decide:
   futmarket build-dataset           assemble the ML feature matrix
   futmarket train                   train + walk-forward validate the models
   futmarket picks                   what to buy, at what price, and why
+  futmarket evaluate                would this rule have made money? by month
   futmarket scorecard               how past picks have actually done
   futmarket insights                refresh the dashboard's market rhythms
   futmarket notify                  post a run summary to Discord
@@ -264,29 +265,45 @@ def cmd_picks(args) -> None:
     conn = db.connect(config.database_path)
     source = _resolve_source(conn, args.source, config)
     try:
-        found = picks_mod.generate(
-            conn, source=source, tax_rate=config.tax_rate,
-            min_confidence=args.min_confidence, limit=args.limit,
+        common = dict(
+            source=source, tax_rate=config.tax_rate,
+            sell_slippage_pct=config.sell_slippage_pct,
+            buy_premium_pct=config.buy_premium_pct,
+            limit=args.limit,
             min_price=args.min_price, max_price=config.max_price,
-            entry_z_max=config.entry_z_max,
-            entry_floor_max_pct=config.entry_floor_max_pct,
             stop_buffer_pct=config.stop_buffer_pct, stop_min_pct=config.stop_min_pct,
             stop_max_pct=config.stop_max_pct, min_reward_risk=config.min_reward_risk,
+            min_expected_net_pct=config.min_expected_net_pct,
             min_sales_per_hour=args.min_sales_per_hour)
-    except RuntimeError as e:
+        if args.strategy == "all":
+            found = picks_mod.generate_all(conn, **common)
+        else:
+            found = picks_mod.generate(conn, strategy=args.strategy, **common)
+    except (RuntimeError, ValueError) as e:
         sys.exit(str(e))
 
     if not found:
-        print("no cards clear the confidence bar today — sit out")
+        from .ml import evaluate
+        cost = evaluate.round_trip_cost_pct(
+            tax_rate=config.tax_rate, sell_slippage_pct=config.sell_slippage_pct,
+            buy_premium_pct=config.buy_premium_pct)
+        print(f"nothing worth buying today — sit out.\n"
+              f"(a trade has to make {cost:+.1f}% just to cover tax and fees, and "
+              f"no card on a deep enough dip is expected to clear that.)")
         return
 
-    print(f"\n{len(found)} candidate(s), most confident first\n")
+    print(f"\n{len(found)} candidate(s), best expected return first\n")
     for i, p in enumerate(found, 1):
         band = (f"{p.buy_low:,}-{p.buy_high:,}" if p.buy_low
                 else f"~{p.price_now:,} (no sale data yet)")
         rating = f"{p.rating}" if p.rating else "--"
+        trade = picks_mod.STRATEGIES[p.strategy]["summary"]
         print(f"{i:>2}. {p.name}  ({rating} {p.version[:28]})")
-        print(f"    BUY   {band}          confidence {p.confidence:.0%}")
+        print(f"    {trade}")
+        print(f"    BUY   {band}")
+        print(f"    HOLD  ~{p.hold_days} days   worth {p.expected_net_pct:+.0f}% "
+              f"after tax and fees   ({p.confidence:.0%} to pay off, "
+              f"{p.expected_alpha_pct:+.0f}% better than picking blind)")
         print(f"    SELL  ~{p.sell_target:,}      stop {p.stop:,}   "
               f"(reward:risk {p.reward_risk:g})")
         liq = f"tier {p.liquidity_tier}" if p.liquidity_tier else "?"
@@ -387,14 +404,19 @@ def cmd_sale_stats(args) -> None:
         return
 
     def progress(res):
-        print(f"  ...{res['cards']} cards ({res['stored']} stored, {res['failed']} failed)")
+        print(f"  ...{res['cards']} cards ({res['stored']} stored, "
+              f"{res['sold_points']:,} real sale prices banked, "
+              f"{res['failed']} failed)", flush=True)
 
-    print(f"fetching real completed-sale prices"
+    tiers = tuple(args.tiers.upper())
+    print(f"fetching real completed-sale prices for tiers {'/'.join(tiers)}"
           f"{' (limit %d)' % args.limit if args.limit else ''}...")
     res = sales.refresh_sale_stats(conn, limit=args.limit, delay=args.delay,
-                                   progress=progress)
+                                   min_tier=tiers, progress=progress)
     print(f"sale stats: {res['cards']} cards fetched, {res['stored']} stored, "
           f"{res['thin']} too few sales, {res['failed']} failed")
+    print(f"banked {res['sold_points']:,} real sale prices into the "
+          f"'{sales.SOLD_SOURCE}' series")
 
 
 def cmd_train(args) -> None:
@@ -409,38 +431,100 @@ def cmd_train(args) -> None:
     res = train_mod.train(conn, source=source, horizon=horizon,
                           stop_buffer_pct=config.stop_buffer_pct,
                           stop_min_pct=config.stop_min_pct,
-                          stop_max_pct=config.stop_max_pct, n_splits=args.splits)
+                          stop_max_pct=config.stop_max_pct,
+                          tax_rate=config.tax_rate,
+                          sell_slippage_pct=config.sell_slippage_pct,
+                          buy_premium_pct=config.buy_premium_pct,
+                          n_splits=args.splits)
     if "error" in res:
         sys.exit(res["error"])
 
-    print(f"\ndata: {res['rows']:,} rows, {res['cards']:,} cards\n")
+    print(f"\ndata: {res['rows']:,} rows ({res['liquid_rows']:,} tradeable), "
+          f"{res['cards']:,} cards\n")
 
-    f = res["forecast"]
-    print("FORECASTER (price move + confidence band)")
-    if f.get("folds"):
-        verdict = "BEATS baseline" if f["beat_baseline"] else "does NOT beat baseline"
-        print(f"  folds              {f['folds']}")
-        print(f"  MAE                {f['mae']}%  (baseline {f['baseline_mae']}%)")
-        print(f"  skill vs baseline  {f['skill_vs_baseline_pct']}%   -> {verdict}")
-        print(f"  band coverage      {f['band_coverage_p10_p90']:.1%} (target ~80%)")
-    else:
-        print(f"  {f.get('note', 'not evaluated')}")
+    print("HOW FAR A CARD BEATS THE MARKET  (lower error is better)")
+    print("  hold   error   'no view'   skill  |  on the cards we'd actually trade")
+    for h in res["horizons"]:
+        m = res["excess"].get(h, {})
+        if not m.get("folds"):
+            print(f"  {h:>3}d   {m.get('note', 'not evaluated')}")
+            continue
+        gated = (f"{m['gated_skill_pct']:+6.2f}%  (n={m['gated_folds']} folds)"
+                 if m.get("gated_skill_pct") is not None else "too few to judge")
+        print(f"  {h:>3}d  {m['mae']:6.2f}%  {m['baseline_mae']:6.2f}%  "
+              f"{m['skill_vs_market_pct']:+6.2f}%  |  {gated}")
 
-    d = res["direction"]
-    print("\nDIRECTION (will a trade hit target before stop?)")
-    if d.get("folds"):
-        verdict = "BEATS base rate" if d["beat_baseline"] else "does NOT beat base rate"
-        print(f"  folds              {d['folds']}")
-        print(f"  avg precision      {d['avg_precision']}  (base rate {d['base_rate']})")
-        print(f"  lift vs base rate  {d['lift_vs_base_rate']}x   -> {verdict}")
-        print(f"  precision @top 10% {d['precision_at_top_decile']:.1%}")
-    else:
-        print(f"  {d.get('note', 'not evaluated')}")
+    print("\nWILL THE TRADE CLEAR ITS COSTS AND BEAT THE MARKET?")
+    print("  Read the per-gate rows, not the overall one: the previous model showed")
+    print("  2.4x lift overall and still went 0-for-26 live, because it was never")
+    print("  measured on the narrow slice the strategy actually trades.\n")
+    for h in res["horizons"]:
+        m = res["clears"].get(h, {})
+        if not m.get("folds"):
+            print(f"  {h:>3}d   {m.get('note', 'not evaluated')}")
+            continue
+        print(f"  {h:>3}d  overall {m['avg_precision']:.3f} vs base "
+              f"{m['base_rate']:.3f} ({m['lift_vs_base_rate']}x)")
+        for gate, g in (m.get("gates") or {}).items():
+            mark = "OK" if g["beats_baseline"] else "!!"
+            print(f"        {mark} {gate:<12} {g['precision']:.1%} pay off vs "
+                  f"{g['base_rate']:.1%} picking blind ({g['lift']}x)")
 
+    print("\nWHAT EACH TRADE HAS ACTUALLY PAID  (out of sample, net of all costs)")
+    for gate, profile in (res.get("payoffs") or {}).items():
+        if not profile:
+            print(f"  {gate:<12} no usable history yet")
+            continue
+        print(f"  {gate}")
+        for h, p in sorted(profile.items()):
+            ev = p["base_rate"] * p["win_net"] + (1 - p["base_rate"]) * p["loss_net"]
+            print(f"    {h:>3}d  win {p['win_net']:+6.1f}%  loss {p['loss_net']:+6.1f}%  "
+                  f"pays off {p['base_rate']:.0%} of the time  -> {ev:+5.1f}% blind"
+                  f"   (n={p['n']:,})")
+
+    if res.get("predictions_saved"):
+        print(f"\nstored {res['predictions_saved']:,} predictions for calibration")
     if res["runs"]:
         print("\nregistered runs:")
         for kind, info in res["runs"].items():
-            print(f"  {kind:<9} run_id={info['run_id']}  {info['artifact']}")
+            print(f"  {kind:<9} run_id={info['run_id']}  "
+                  f"horizons {info['horizons']}  {info['artifact']}")
+
+
+def cmd_evaluate(args) -> None:
+    """The honest scoreboard: how a gate would really have done, month by month."""
+    from .ml import dataset, evaluate
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    source = _resolve_source(conn, args.source, config)
+
+    print("building the feature matrix (this takes a minute)...")
+    frame = dataset.build_dataset(conn, source=source)
+    if frame.empty:
+        sys.exit("no data — run backfill-history first")
+
+    gates = [args.gate] if args.gate != "all" else list(evaluate.GATES)
+    horizons = ([args.horizon] if args.horizon
+                else list(evaluate.HORIZONS))
+    frame = evaluate.add_forward_returns(frame, horizons=horizons)
+
+    cost = evaluate.round_trip_cost_pct(
+        tax_rate=config.tax_rate, sell_slippage_pct=config.sell_slippage_pct,
+        buy_premium_pct=config.buy_premium_pct)
+    print(f"\nA trade must make {cost:+.1f}% gross just to cover the round trip.")
+    print("Headline is the MEDIAN on tradeable (tier A/B) cards, and ALPHA is that")
+    print("minus what the market did over the same window.\n")
+
+    for gate in gates:
+        for h in horizons:
+            res = evaluate.backtest(
+                frame, horizon=h, gate=gate, tax_rate=config.tax_rate,
+                sell_slippage_pct=config.sell_slippage_pct,
+                buy_premium_pct=config.buy_premium_pct)
+            print(f"### {gate} held {h}d")
+            print(evaluate.format_report(res))
+            print()
 
 
 def cmd_build_dataset(args) -> None:
@@ -616,8 +700,9 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("picks", help="what to buy right now, at what price, and why")
     p.add_argument("--source", default=None)
     p.add_argument("--limit", type=int, default=20, help="how many candidates to show")
-    p.add_argument("--min-confidence", type=float, default=0.30,
-                   help="ignore cards the model is less sure about than this")
+    p.add_argument("--strategy", default="all",
+                   help="which trade to look for: all | relval_v1 (deep dip) | "
+                        "release_v1 (promo release crash)")
     p.add_argument("--min-price", type=int, default=1000,
                    help="ignore near-discard cards (their %% moves are noise "
                         "and the coins aren't worth trading)")
@@ -699,6 +784,9 @@ def main(argv: list[str] | None = None) -> None:
                        help="fetch what cards REALLY sold for (true price band + trade rate)")
     p.add_argument("--limit", type=int, default=None, help="cap cards fetched")
     p.add_argument("--delay", type=float, default=1.5, help="seconds between cards")
+    p.add_argument("--tiers", default="AB",
+                   help="liquidity tiers to sweep, e.g. AB or ABC (ABC is the "
+                        "full ~8k tradeable universe and takes hours)")
     p.add_argument("--show", type=int, default=None, metavar="N",
                    help="just display the top N stored bands instead of fetching")
     p.set_defaults(func=cmd_sale_stats)
@@ -710,6 +798,15 @@ def main(argv: list[str] | None = None) -> None:
                    help="label horizon in days (default: config horizon_days)")
     p.add_argument("--splits", type=int, default=4, help="walk-forward folds")
     p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("evaluate",
+                       help="the honest scoreboard: would this rule have made money?")
+    p.add_argument("--source", default=None)
+    p.add_argument("--gate", default="relval_v1",
+                   help="which entry rule to test: dip_v1 | relval_v1 | deep | all")
+    p.add_argument("--horizon", type=int, default=None,
+                   help="holding period in days (default: sweep 3/5/7/10/14)")
+    p.set_defaults(func=cmd_evaluate)
 
     p = sub.add_parser("build-dataset",
                        help="assemble the ML feature matrix (card + cohort + lifecycle)")

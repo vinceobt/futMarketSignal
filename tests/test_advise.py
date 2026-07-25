@@ -7,16 +7,24 @@ from futmarket.ml import advise
 
 def _row(**kw):
     base = dict(price=10_000, dist_to_floor_pct=2.0, dist_to_ceiling_pct=20.0,
-                z_score=-1.0, confidence=0.7, name="Test Card", rating=84,
+                z_score=-2.0, confidence=0.7, name="Test Card", rating=84,
                 version="Rare")
     base.update(kw)
     return pd.Series(base)
 
 
-def test_buy_when_cheap_on_the_dip_and_confident():
+def test_buy_when_cheap_on_a_deep_dip_and_confident():
     r = advise.card_read(_row())
     assert r["verdict"] == "BUY"
     assert r["target"] > r["price"] > r["stop"]
+
+
+def test_shallow_dip_is_watch_not_buy():
+    """z <= -0.5 nets -2.85% after the round trip; z <= -1.5 nets +4.14%. Being
+    'on a dip' is a description, not a reason to buy."""
+    r = advise.card_read(_row(z_score=-0.8))
+    assert r["verdict"] == "WATCH"
+    assert "round trip" in r["headline"]
 
 
 def test_wait_when_not_on_a_dip():

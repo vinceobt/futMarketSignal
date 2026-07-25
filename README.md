@@ -16,13 +16,19 @@ data, learns from it, and makes recommendations.
   real completed-sale prices, the promo/SBC/TOTW/news calendar, and social buzz.
 - **Learns** card behaviour and cohort relationships (how groups of similar cards
   move together), with strict no-leakage discipline and walk-forward validation.
-- **Recommends** liquid cards to buy — with a buy band, sell target, stop, the
-  reasons, and the fut.gg link — and **grades its own past calls** so you can see
-  whether it actually works.
+- **Recommends** liquid cards to buy — with a buy band, sell target, stop, **how
+  long to hold**, the reasons, and the fut.gg link — and **grades its own past
+  calls** so you can see whether it actually works.
 - **Runs 24/7** on a schedule, refreshing a live dashboard and pinging Discord.
 
 **Liquidity is rule #1:** it only recommends cards that genuinely sell fast, because
 a correct call you can't get out of makes no money.
+
+**Costs come first.** EA's 5% tax plus sell slippage means a trade must gain
+**+7.4%** just to break even, and the median tradeable card doesn't move at all
+over a fortnight. So the model predicts how far a card will beat *the market*,
+and a card is only recommended when that is expected to clear the round trip.
+When nothing does, it says **buy nothing** — which is usually the right answer.
 
 ## Setup
 
@@ -37,6 +43,7 @@ YouTube/Reddit). Everything else lives in `config.yaml`.
 
 ```bash
 futmarket picks                 # what to buy right now, at what price, and why
+futmarket evaluate --gate all   # would this rule have made money? month by month
 futmarket scorecard             # how past picks have actually done
 futmarket dashboard --port 8899 # live web dashboard (open /ml)
 
@@ -75,7 +82,7 @@ Mac.
 src/futmarket/
   collectors/   raw data in (prices, history, calendar, sales, social)
   services/     orchestration (registry, backfill, liquidity, scorecard, notify…)
-  ml/           the brain (dataset, cohorts, labels, train, picks, dashboard)
+  ml/           the brain (dataset, cohorts, labels, evaluate, train, picks, dashboard)
   cli.py db.py config.py webapp.py …
 tests/          pytest suite (no network)
 ```

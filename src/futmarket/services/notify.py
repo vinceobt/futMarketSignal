@@ -26,14 +26,14 @@ def sell_alerts(conn, webhook_url: str, *, source: str = "futgg", title: str = "
     """Ping Discord to SELL a held pick that has reached its target, or CUT one that
     hit its stop. Each pick alerts once (recorded via ``alerted_at``)."""
     from ..alerts import DiscordAlerter
-    from ..ml.picks import STRATEGY_VERSION
+    from ..services.scorecard import CURRENT_STRATEGIES
     alerter = DiscordAlerter(webhook_url)
     now = datetime.now(timezone.utc)
     sale_net = (1 - tax_rate) * (1 - sell_slippage_pct / 100.0)
     sent = 0
     for pick in db.open_picks(conn, title=title):
         # only alert on the current strategy's real positions, not old paper picks
-        if pick["strategy"] != STRATEGY_VERSION or pick["alerted_at"]:
+        if pick["strategy"] not in CURRENT_STRATEGIES or pick["alerted_at"]:
             continue
         price = db.latest_price(conn, pick["player_id"], source)
         if price is None:
@@ -72,7 +72,8 @@ def build_run_summary(conn, *, title: str = "fc26", top: int = 6) -> str:
     if latest:
         picks = conn.execute(
             """SELECT p.buy_low, p.buy_high, p.target_price, p.confidence,
-                      p.sales_per_hour, m.name, m.rating, m.version, m.url
+                      p.chosen_horizon_days, p.sales_per_hour,
+                      m.name, m.rating, m.version, m.url
                FROM pick_log p LEFT JOIN card_meta m ON m.player_id = p.player_id
                WHERE p.title = ? AND p.picked_at = ?
                ORDER BY p.confidence DESC LIMIT ?""",
@@ -90,17 +91,23 @@ def build_run_summary(conn, *, title: str = "fc26", top: int = 6) -> str:
             tag = _card_tag(p["rating"], p["version"])
             conf = f"{p['confidence']:.0%}" if p["confidence"] is not None else "?"
             sph = f" · {p['sales_per_hour']:.0f}/hr" if p["sales_per_hour"] else ""
+            hold = (f" · hold ~{p['chosen_horizon_days']}d"
+                    if p["chosen_horizon_days"] else "")
             lines.append(
                 f"🟢 **{name}**{tag} — buy {_coins(p['buy_low'])}–{_coins(p['buy_high'])}"
-                f" → sell {_coins(p['target_price'])} · {conf}{sph}")
+                f" → sell {_coins(p['target_price'])}{hold} · {conf}{sph}")
             if p["url"]:
                 lines.append(f"<{p['url']}>")
 
     s = scorecard.summary(conn, title=title)
     if s.get("graded"):
+        # Alpha first: the median tradeable card doesn't move over a fortnight, so
+        # a flat market already reads as -6.9% once the round trip is paid.
+        alpha = (f" · {s['alpha_vs_market_pct']:+.1f}% vs the market"
+                 if s.get("alpha_vs_market_pct") is not None else "")
         lines.append(
             f"📊 Record: {s['hit_target']}W-{s['hit_stop']}L · {s['win_rate']:.0%} win · "
-            f"{s['return_on_capital_pct']:+.1f}% on capital "
+            f"{s['return_on_capital_pct']:+.1f}% on capital{alpha} "
             f"({s['coins_pnl']:+,} coins over {s['graded']} trades, {s['open']} open)")
     else:
         lines.append(f"📊 Record: {s.get('total', 0)} picks logged, none graded yet.")

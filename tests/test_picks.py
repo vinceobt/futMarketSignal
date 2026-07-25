@@ -3,6 +3,7 @@
 import pandas as pd
 import pytest
 
+from futmarket import db as futdb
 from futmarket.ml import picks
 
 
@@ -37,8 +38,12 @@ def test_reason_weekly_supply_cycle():
 
 
 def test_reason_release_curve():
-    out = picks._reasons(_row(days_since_card_release=9))
-    assert any("usual bottom" in r for r in out)
+    """The measured bottom is day 4-6, not the day-9 folklore: held three weeks
+    it returns +11.5% net at +25pp alpha, better than day 7-9 at every horizon."""
+    best = picks._reasons(_row(days_since_card_release=5))
+    assert any("measured" in r and "bottom" in r for r in best)
+    later = picks._reasons(_row(days_since_card_release=9))
+    assert any("past the best window" in r for r in later)
     fresh = picks._reasons(_row(days_since_card_release=1))
     assert any("release crash" in r for r in fresh)
 
@@ -92,7 +97,8 @@ def test_barriers_target_resistance_stop_support():
     """Target sits at the card's resistance, stop below its support, and the
     reward:risk is computed net of tax."""
     target, stop, rr = picks._barriers(
-        20_000, ceil_pct=20.0, floor_pct=4.0, tax_rate=0.05)
+        20_000, 20_000, ceil_pct=20.0, floor_pct=4.0, tax_rate=0.05,
+        stop_min_pct=5.0, stop_buffer_pct=2.0)
     assert target == 24_000                     # +20% to resistance
     assert stop == round(20_000 * (1 - 0.06))   # floor 4% + 2% buffer
     assert target > 20_000 > stop and rr > 1.0
@@ -100,5 +106,157 @@ def test_barriers_target_resistance_stop_support():
 
 def test_barriers_reward_risk_reflects_a_thin_ceiling():
     """A card near its ceiling has little upside -> low reward:risk (gets skipped)."""
-    _, _, rr = picks._barriers(20_000, ceil_pct=3.0, floor_pct=4.0, tax_rate=0.05)
+    _, _, rr = picks._barriers(20_000, 20_000, ceil_pct=3.0, floor_pct=4.0,
+                               tax_rate=0.05, stop_min_pct=5.0)
     assert rr < 1.0
+
+
+def test_stop_is_never_above_the_market_price():
+    """**The bug that broke the last strategy.**
+
+    Barriers used to be derived from the marked-up entry while the scorer
+    compared them against the raw market series, so a "5% stop" landed on
+    average 0.76% ABOVE the live price and 53 of 59 trades stopped out before
+    they began. The stop must be a level on the series that grades it, whatever
+    premium the entry carries.
+    """
+    market = 20_000
+    for premium in (1.0, 1.05, 1.25, 1.5):      # including the pathological ones
+        entry = int(market * premium)
+        target, stop, _ = picks._barriers(
+            market, entry, ceil_pct=20.0, floor_pct=4.0, tax_rate=0.05)
+        assert stop < market, f"stop {stop} not below market {market} at {premium}x"
+        assert target > market
+
+
+def test_stop_sits_outside_the_cards_daily_noise():
+    """The median card-day ranges 14.3%. A 5% stop is a coin-flip on jitter and
+    truncates exactly the recovery the trade exists to capture."""
+    _, stop, _ = picks._barriers(20_000, 20_000, ceil_pct=25.0, floor_pct=1.0,
+                                 tax_rate=0.05)
+    assert (1 - stop / 20_000) * 100 >= picks.STOP_MIN_PCT >= 12.0
+
+
+# ---- choosing how long to hold, and whether to trade at all ----------------
+
+# What the gate has historically paid at each horizon. Wins grow with the hold;
+# losses do too, which is what makes the choice non-trivial.
+PAYOFFS = {
+    3:  {"win_net": 12.0, "loss_net": -10.0, "base_rate": 0.37},
+    5:  {"win_net": 16.0, "loss_net": -12.0, "base_rate": 0.36},
+    7:  {"win_net": 20.0, "loss_net": -14.0, "base_rate": 0.35},
+    10: {"win_net": 28.0, "loss_net": -16.0, "base_rate": 0.42},
+    14: {"win_net": 35.0, "loss_net": -18.0, "base_rate": 0.40},
+}
+
+
+def _plan(clears, *, payoffs=None, **kw):
+    probs = (clears if isinstance(clears, dict)
+             else {h: clears for h in PAYOFFS})
+    return picks._choose_horizon(probs, payoffs or PAYOFFS, **kw)
+
+
+def test_a_coin_flip_is_not_a_trade():
+    """The answer the old code could never give. At the gate's own base rate the
+    expected value is negative, so the honest recommendation is to buy nothing."""
+    assert _plan(0.40) is None
+
+
+def test_a_confident_card_becomes_a_trade():
+    plan = _plan(0.80)
+    assert plan is not None
+    horizon, expected, edge, prob = plan
+    assert horizon in PAYOFFS
+    assert expected > picks.MIN_EXPECTED_NET_PCT
+    assert edge > 0                       # better than picking blind from the gate
+    assert prob == pytest.approx(0.80)
+
+
+def test_the_shortest_horizon_that_pays_wins():
+    """Coins tied up in one card are coins not working in another, so the choice
+    is best expected return *per day held*, not the biggest headline number."""
+    flat = {3: {"win_net": 30.0, "loss_net": -5.0, "base_rate": 0.4},
+            14: {"win_net": 32.0, "loss_net": -5.0, "base_rate": 0.4}}
+    horizon, _, _, _ = _plan(0.9, payoffs=flat)
+    assert horizon == 3          # nearly the same payoff, a fifth of the wait
+
+
+def test_a_much_bigger_payoff_justifies_a_longer_hold():
+    steep = {3: {"win_net": 8.0, "loss_net": -6.0, "base_rate": 0.4},
+             14: {"win_net": 90.0, "loss_net": -6.0, "base_rate": 0.4}}
+    horizon, _, _, _ = _plan(0.9, payoffs=steep)
+    assert horizon == 14
+
+
+def test_a_horizon_the_model_is_unsure_about_is_skipped():
+    """Per-horizon probabilities differ, and only the confident ones qualify."""
+    probs = {h: 0.2 for h in PAYOFFS}
+    probs[10] = 0.85
+    horizon, _, _, _ = _plan(probs)
+    assert horizon == 10
+
+
+def test_the_magnitude_head_is_deliberately_not_consulted():
+    """Measured: the excess-return regressor scores WORSE than assuming a card
+    moves with the market (-12% to -19% skill). Expected value must come from the
+    classifier, which works, plus the gate's measured history -- never from a
+    predicted magnitude we have no evidence for."""
+    import inspect
+    args = inspect.signature(picks._choose_horizon).parameters
+    assert "excess" not in args and "market_drift" not in args
+
+
+def test_target_is_capped_at_what_the_gate_has_actually_paid():
+    """A real pick quoted a sell 141% up with reward:risk 5.1 — that was the
+    card's 30-day high, i.e. the price it used to be before it crashed, not a
+    fortnight's trade. The target is capped at the measured winning payoff."""
+    # resistance is 141% up, but a winning trade at this horizon nets ~27%
+    target, _, rr = picks._barriers(
+        12_000, 12_600, ceil_pct=141.0, floor_pct=2.0, tax_rate=0.05,
+        sell_slippage_pct=2.0, payoff_target_pct=36.0)
+    assert target == round(12_000 * 1.36)
+    assert rr < 2.0                      # a believable ratio, not 5.1
+
+
+def test_resistance_still_caps_from_the_other_side():
+    """No sense targeting through a level the card keeps failing at."""
+    target, _, _ = picks._barriers(
+        10_000, 10_000, ceil_pct=8.0, floor_pct=2.0, tax_rate=0.05,
+        payoff_target_pct=36.0)
+    assert target == round(10_000 * 1.08)
+
+
+# ---- two strategies, judged separately ------------------------------------
+
+def test_strategies_name_gates_that_actually_exist():
+    """Picks and the backtest must share one gate definition, or what we trade
+    and what we claim to have measured quietly drift apart."""
+    from futmarket.ml import evaluate
+    for name, spec in picks.STRATEGIES.items():
+        assert spec["gate"] in evaluate.GATES, f"{name} names an unknown gate"
+        assert spec["horizons"], f"{name} has no holding periods"
+
+
+def test_the_release_trade_is_allowed_below_the_floor():
+    """Trap #7 says below the 30-day low is a falling knife — true for a dip, and
+    deliberately wrong for a six-day-old promo card, which makes a new low every
+    day it exists. Its protection is the time stop and its age instead."""
+    assert picks.STRATEGIES["release_v1"]["allow_below_floor"] is True
+    assert not picks.STRATEGIES["relval_v1"].get("allow_below_floor")
+
+
+def test_generate_rejects_an_unknown_strategy(conn):
+    with pytest.raises(ValueError, match="unknown strategy"):
+        picks.generate(conn, strategy="nonsense")
+
+
+def test_a_pick_carries_the_strategy_that_made_it(conn):
+    """The two trades pay differently, so the record must never blend them."""
+    p = picks.Pick(player_id="c1", name="x", rating=84, version="TOTS",
+                   confidence=0.7, price_now=10_000, buy_low=10_000,
+                   buy_high=10_500, sell_target=13_000, stop=8_500,
+                   reward_risk=1.2, liquidity_tier="A", sales_per_hour=50.0,
+                   strategy="release_v1")
+    futdb.upsert_card_meta(conn, {"player_id": "c1", "name": "x"})
+    picks.save(conn, [p])
+    assert futdb.open_picks(conn)[0]["strategy"] == "release_v1"

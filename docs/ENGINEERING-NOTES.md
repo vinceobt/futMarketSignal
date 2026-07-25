@@ -31,32 +31,89 @@ and still improving. Training never stops; it carries forward into each new game
 
 ---
 
-## 2. Current state (2026-07-21)
+## 2. Current state (2026-07-25)
 
 Working, end to end, with a **command-center dashboard** you run everything from.
 
 | Layer | State |
 |---|---|
 | Card registry | 9,998 cards (8,231 tradeable) |
-| Price history | **2.5M snapshots**, full season since 2025-09-08 |
-| Event calendar | 247 events; promos now classified by **type** (Icon/Hero/TOTS/…) |
-| Features | card behaviour + cohorts + lifecycle + weekly rhythm + release curve + **social buzz** + **major-promo distance** |
-| Models | scikit-learn HistGradientBoosting — forecast + direction heads (5-day horizon) |
-| Strategy | **`dip_v1`**: buy cheap/mid cards (< 40k) **on the dip** (oversold + near their own floor), per-card barriers, sell into resistance |
-| Output | `futmarket picks` (buy list) · `futmarket advise <card\|--rating N>` (consult) · dashboard `/ml` |
+| Price history | **2.85M snapshots**, full season since 2025-09-08 |
+| Event calendar | 247 events; promos classified by **type** (Icon/Hero/TOTS/…) |
+| Features | card behaviour + cohorts + lifecycle + weekly rhythm + release curve + social buzz + major-promo distance + **market drift / excess return** |
+| Models | scikit-learn HistGradientBoosting — **excess** + **clears-cost** heads, one per horizon (3/5/7/10/14/21d) |
+| Strategies | **`release_v1`** (promo card 4–6 days into its release crash, held ~3 weeks) and **`relval_v1`** (deep dip, z ≤ −1.5 on its 30-day floor, held ~2 weeks). Near-disjoint (2.3% overlap); judged separately. |
+| Prices | listing index (`futgg`) **+ real completed sales banked as their own series (`futgg_sold`)** |
+| Output | `futmarket picks` · `futmarket advise` (consult) · **`futmarket evaluate`** (the honest scoreboard) · dashboard `/ml` |
 
-### The pivotal finding (why the strategy is what it is)
-Backtest over 35k+ trades: the edge is **not** in barrier-tuning, it's in *what*
-you trade. Cheap/mid cards bought oversold-on-the-dip return **+5–11% on capital**
-net of tax; **expensive icons lose −8%** (priced efficiently, tax eats the margin)
-and were dragging the whole system negative. The old flat **+25%/−8%** barriers
-also stopped out on normal noise (cards swing ~17–24%/week). The current strategy
-trades only the dip on cheap/mid cards, sizes stop/target to each card's own range,
-and **backtests +4.4% on capital vs the old live −4.6%.**
+### The pivotal findings (why the strategy is what it is)
 
-**Honest status:** the new strategy backtests positive but is **not yet proven
-live** — it only started recording `dip_v1` picks on 2026-07-21. Backtests flatter;
-the coin-weighted scorecard is the real judge. See §10.
+**1. The round trip is the whole game.** 5% EA tax + 2% sell slippage means a
+trade must gain **+7.4% gross to break even**. And **the median tradeable card
+does not move at all over a fortnight** — so the median *trade*, before any skill
+is involved, is exactly **−6.9%**. Half the market is inert; the costs are the
+entire obstacle. Any rule whose expected move is smaller than 7.4% loses, however
+good the model is. (Some months the market genuinely falls too: −56% net in
+2025-09, −19% in 2026-02.)
+
+**2. The old strategy was mathematically incapable of working.** `dip_v1` bought
+a shallow dip (z ≤ −0.5) and held 5 days. That bounce is ~4.7% gross — below the
+break-even. Measured month by month on tradeable cards it nets **−2.85%**.
+
+**3. But the dip signal is real.** A *deep* dip (z ≤ −1.5, within 3% of the
+30-day floor) held **14 days** nets **+4.14%** and beats the market in **10 of 11
+months**; z ≤ −2.0 nets **+9.53%** with a 65% win rate. The edge grows with
+holding period because the bounce needs time to clear the costs.
+
+**4. Alpha, not absolute return, is the honest measure.** In a market where half
+of all cards are inert, "−3% in a month when everything did −9%" is a good call.
+Every backtest and the live scorecard now report the gate's median minus the
+same-month, same-tier universe median.
+
+**5. Illiquid cards fake an edge.** Tier C returns +17.3% on the dip trade, tier A
+just +1.6%. That inversion is measurement noise — the thinner the card, the more
+its "price" is one stale listing. Headlines are restricted to tier A/B.
+
+**6. The release crash is the better trade, and it isn't where the folklore says.**
+Measured on liquid special cards (base golds excluded — they have no release
+event), net of all costs, month by month:
+
+| Buy at age | held 7d | held 14d | held 21d |
+|---|---|---|---|
+| 0–1 days (the debut) | −11.3% | −6.9% | −3.3% |
+| **4–6 days** | −0.7% | **+7.0%** | **+11.5%** |
+| 7–9 days (the "day-nine bottom") | −2.0% | +1.6% | +3.7% |
+
+At 21 days the 4–6 window returns **+11.5% median, +25pp alpha, 67% win rate,
+positive in 10 of 10 months** — and unlike the dip trade, **tier A is the *best*
+tier** (+35.6%, 79% win, vs +10.4% on tier B). When the *most* tradeable cards do
+best, the effect is real; the reverse pattern is what an artifact looks like.
+
+Two corrections to long-held beliefs here: the bottom to buy is **day 4–6, not
+day 9**, and **never buy the debut** — age 0–1 loses money and lags the market at
+every horizon.
+
+**7. We can predict *whether* a dip pays, not *how much*.** Measured walk-forward
+on the traded slice:
+
+| Head | Asks | Result |
+|---|---|---|
+| `clears` | will this trade beat the market and cover costs? | **52–59% vs a 35–42% base rate** — real skill |
+| `excess` | by how much will it beat the market? | **−12% to −19% skill** — worse than assuming it doesn't |
+
+So the strategy uses the classifier for the per-card call and the gate's own
+**measured** win/loss history for the size of the payoff. Nothing is built on the
+magnitude head; it is still trained and reported so we notice if it ever starts
+working. This is why `picks._choose_horizon` takes probabilities and a payoff
+profile rather than a predicted return.
+
+**Honest status:** `relval_v1` backtests positive but is **not yet proven live** —
+it starts recording picks on 2026-07-25. Backtests flatter; the coin-weighted
+scorecard, read as **alpha**, is the real judge. See §10.
+
+The previous live record (`dip_v1`, 53 stops / 6 targets) measures a **bug, not a
+strategy** — see trap #11. Those rows are retagged `dip_v1_broken` and never
+appear in a headline.
 
 ---
 
@@ -131,6 +188,51 @@ not by tests.
    writers at once.
 10. **Tests must never hit the network.** A defaulted-on EA news fetch silently
     leaked into two tests.
+11. **Barriers must be levels on the series that grades them.** `dip_v1` derived
+    its stop from `entry` (= `buy_high`, ~5% over market) but the scorer compared
+    it against the raw market price. The stop therefore landed **0.76% *above***
+    the live price on average, and **53 of 59** trades stopped out — most within
+    hours. A test now asserts `stop_price < market_price` at any buy premium.
+12. **Never grade on a different price series than you train on.** Labels used
+    daily prices; scoring walked every 2-hourly tick. The median card-day ranges
+    **14.3%**, so the tick version stops out on sampling jitter. Both ends now
+    read the same robust daily series (`db.daily_prices`).
+13. **Validate on the population you actually trade.** The old direction head
+    showed 2.4x lift over 771k rows and went **0-for-26** on its highest-confidence
+    live picks — it was never measured on the narrow gated slice it was asked
+    about. Training now reports a `gated_precision` beside every global metric.
+14. **Take the day's median snapshot, not its last.** Using the last print gave
+    day-to-day return std of **193%**; the median gives **41%**. More than half
+    this market's apparent volatility was an artifact of collector timing.
+15. **One open position per card.** The loop re-derives the shortlist every two
+    hours. Without a dedupe, 92 "trades" were really 37 cards, some simultaneously
+    `open` and `stop`. `db.has_open_pick` guards both `generate` and `save`.
+16. **A model that beats a weak baseline has proved nothing.** The forecaster beat
+    "assume no change" by **0.42%** — i.e. not at all — and shipped anyway. The
+    baseline is now "assume this card moves with the market".
+17. **The release trade dies silently if new cards aren't collected within a day.**
+    Cards released 19–24 Jul got their first price snapshot on the 25th, so every
+    one of those day-4-to-6 windows was missed and `picks` simply returned
+    nothing — looking like "no opportunities" rather than a broken pipeline. The
+    loop now runs `build-registry --max-pages 4` **every cycle** (page 1 of
+    fut.gg's list is the newest cards, so it costs 4 requests), and
+    `MIN_HISTORY_DAYS` is 2 to leave slack for a day of collection lag. If
+    `release_v1` goes quiet for more than a week, check this first:
+    `select max(release_date) from card_meta` against the first snapshot date for
+    those cards.
+18. **`scripts/ml_daily.sh` is a template, not what runs.** The LaunchAgent runs
+    the rendered copy at `data/.ml_daily.rendered.sh`. Editing the template alone
+    changes nothing — re-render it (`make autonomous-install`, or the `sed` block
+    in `scripts/install_ml.sh` if you don't want to bounce the agent).
+19. **A capped collector must order by staleness, not by rank.** `sale-stats`
+    ordered by liquidity, so `--limit N` re-fetched the same N cards every cycle
+    and coverage never grew past the head of the list. Now: never-fetched first,
+    then least-recently-refreshed. Any future capped sweep needs the same shape.
+20. **Don't bulk-sweep fut.gg.** A continuous 8k-card run at 1.6s stalled at ~600
+    cards behind escalating backoff (10s → 320s) and banked nothing further for
+    40 minutes. Rate limits are real (§7). Collect in slices from the 2-hourly
+    loop instead — 250 cards at 2s covers the universe in three days and then
+    keeps it fresh.
 
 ---
 
@@ -154,10 +256,11 @@ ml/                  the brain
   dataset      one row per (card, day): card + cohort + lifecycle + behaviour
   cohorts      groups (rating/position/league/nation/version/band) + relative strength
   lifecycle    season position, days to/from promos
-  labels       forward returns + triple-barrier (tax-adjusted)
+  labels       excess return + clears-cost, at every horizon (+ triple-barrier)
+  evaluate     THE HONEST SCOREBOARD: costs, alpha vs market, by month and tier
   validation   walk-forward splits WITH EMBARGO (never random k-fold)
-  train        two heads, gated against a dumb baseline
-  picks        the user-facing recommendations
+  train        two heads x 5 horizons, judged on the slice we actually trade
+  picks        the user-facing recommendations (incl. how long to hold)
   insights     cached market rhythms the dashboard reads
   dashboard    the live /ml web page (server-rendered, read-only)
 top-level: cli, config, db, timeseries, secrets, security, alerts, webapp
@@ -174,11 +277,13 @@ truncating the future leaves past features unchanged. Keep it that way.
 ## 6. Commands
 
 ```bash
-futmarket picks --min-sales-per-hour 5     # ← the product. what to buy, and why
+futmarket picks --min-sales-per-hour 5     # ← the product. both strategies, ranked
+futmarket picks --strategy release_v1      # just the promo release-crash trade
+futmarket evaluate --gate all              # ← would this rule have made money?
 futmarket scorecard                        # how past picks have actually done
-futmarket train                            # retrain (~15 min on full data)
+futmarket train                            # retrain (~30 min: 2 heads x 5 horizons)
 futmarket build-dataset                    # inspect the feature matrix
-futmarket sale-stats --limit 500           # refresh real sold prices
+futmarket sale-stats --tiers ABC           # real sold prices; banks the 'futgg_sold' series
 futmarket build-registry                   # refresh the card universe
 futmarket collect-bulk                     # whole-market price snapshot (4 seconds)
 futmarket backfill-history --order oldest   # deep history, oldest cards first
@@ -219,10 +324,23 @@ Rate limits are real: use ~1.5–2s between per-card calls with exponential back
    at all. The owner asked for this repeatedly; it's the biggest gap.
 2. **Hour-of-day features** — the dump windows above are real, but only July has
    hourly history. The collector banks it now, so this sharpens weekly.
-3. **Live paper-trading track record** — `picks --save` records calls; nothing
-   scores them yet. This is the only real proof the system works.
-4. **Sale-price coverage** — only a few thousand of 8,231 cards have real sale
-   data.
+3. **Live proof of `relval_v1`** — the strategy backtests positive and beats the
+   market in 10 of 11 months, but has no live record yet. This is the only real
+   proof the system works.
+4. **A proven-cleaner price signal.** Real completed sales are now banked as
+   their own series (`futgg_sold`, ~5 points/card/fetch, collected every cycle),
+   but **the noise claim is not yet demonstrated**: over the first 321
+   overlapping hours the sold series had lower variance (std 60% vs 66%) and a
+   *higher* median hourly move (10.0% vs 7.7%). Re-measure after a few weeks —
+   with 3+ days of history `--source futgg_sold` feeds the whole existing
+   pipeline (features, labels, evaluate, train) with no further work.
+   Also measured: real trades clear only **~0.8% above** the cheapest listing at
+   hourly grain, which is why `buy_premium_pct` stays near zero.
+5. **More event-driven trades.** The release curve is now traded (`release_v1`,
+   §2 finding #6) and is the strongest edge measured so far. The same treatment
+   has *not* been applied to the other events already in the calendar: SBC
+   fodder spikes, TOTW day, reward drops. Each is a candidate gate — add it to
+   `evaluate.GATES` and run `futmarket evaluate` before writing any strategy code.
 
 ---
 
@@ -239,55 +357,74 @@ Rate limits are real: use ~1.5–2s between per-card calls with exponential back
 
 ---
 
-## 10. Where we stopped (2026-07-21) — read this when you return
+## 10. Where we stopped (2026-07-25) — read this when you return
 
-The system is feature-complete and running 24/7. The next move is **not more
-building — it's reading the honest scoreboard after ~2 weeks of live trades.**
+The system was rebuilt around one finding: **the previous strategy could not have
+made money, and its live record measured a bug rather than a strategy.** The next
+move is **not more building — it's reading the alpha number after ~3 weeks of live
+`relval_v1` trades.**
 
-### What was built (all committed, 214 tests passing)
-- **The dip strategy (`dip_v1`)** — see §2. Replaced the money-losing +25%/−8% engine.
-- **Honest, coin-weighted scorecard** — return-on-capital, judged on tradeable
-  cards net of tax + sell-slippage. Picks are **tagged by strategy**; the dashboard
-  and `futmarket scorecard` judge `dip_v1` alone, with `legacy` (old engine, ~−6%
-  on capital) shown separately. `scorecard --all` blends them.
-- **Consult** — `futmarket advise <name>` / `--rating N` / `--league …`; also the
-  dashboard search box + group chips. An honest read (BUY/WATCH/WAIT/AVOID) on any
-  card or group, no filters. Scored frame cached at `data/advise_features.pkl`.
-- **Command-center dashboard** (`/ml`) — Consult · Picks · Holding · Track record ·
-  Rhythms · Controls. Server-renders fragments; thin `/app.js`; read endpoints open,
-  `POST /api/run/*` guarded (same-origin + loopback-or-key). Job runner in
-  `services/jobs.py`.
-- **Sell alerts + Holding** — Discord SELL/CUT pings when a held pick hits
-  target/stop (`futmarket sell-alerts`, in the cycle); Holding panel on the dash.
-- **Phone/LAN access** — dashboard binds `0.0.0.0`; open `http://<mac-ip>:8899/`.
-  Reads open; actions need the key off-box. Key lives in the dashboard LaunchAgent
-  + `data/.dashboard_key`.
-- **Learning from everything** — features now include **social buzz** (Reddit/
-  YouTube/X, sparse) and **major-promo distance**; promos classified by type
-  (`ml/promos.py`), per-type market reaction shown on the dashboard.
+### What was wrong (all measured, all now fixed)
+| Defect | Evidence |
+|---|---|
+| Stops landed **above** the market price | avg −0.76% "room"; 53 stops / 6 targets |
+| Model confidence was **inverted** live | high-conf 0-for-26 (−15.0%); low-conf 5-of-17 (+6.6%) |
+| Labels on daily prices, scoring on 2-hourly ticks | median card-day ranges 14.3% |
+| Daily price took the **last** snapshot | return std 193% vs 41% for the median |
+| Forecaster had no skill and was never stored | 0.42% over "assume no change"; `predictions` empty |
+| Track record double-counted | 92 picks over 37 cards, some `open` and `stop` at once |
+| Horizon too short to clear costs | 5-day bounce ≈4.7% gross vs a 7.4% round trip |
 
-### What to check in ~2 weeks (the whole point)
-1. `futmarket scorecard` (or the dashboard Track record). **Look at `dip_v1`
-   return-on-capital**, not legacy. Target: beat the backtest's +4.4%, or at least
-   clear 0% net. It's very selective, so trades accumulate slowly.
-2. If `dip_v1` return-on-capital is **solidly positive** over a meaningful number of
-   graded trades → the strategy works; consider loosening the entry gate
-   (`entry_z_max`, `entry_floor_max_pct`, `max_price` in config.yaml) to trade more.
-3. If it's **around zero / negative** → the backtest didn't hold live (likely fill
-   friction on cheap fodder). Investigate execution: is `buy_high`/`sell_slippage_pct`
-   realistic? Are the cards actually fillable at the quoted band?
+### What was built
+- **`ml/evaluate.py` — the honest scoreboard.** Costs applied once, calendar-matched
+  forward returns, results **by month and by liquidity tier**, headline is
+  **median alpha vs the same-month universe**. `futmarket evaluate --gate all`.
+  Nothing ships unless it beats the market in ≥8 of 11 months.
+- **`relval_v1`** — deep dip (z ≤ −1.5, floor ≤ 3%), stop **outside** the noise
+  (≥15%), barriers anchored to the price series that grades them, and a
+  **model-chosen holding period** per trade (best expected net **per day held**).
+  If nothing clears the round trip, it says **buy nothing** — the old code had no
+  way to give that answer.
+- **Market-relative model** — two heads (`excess`, `clears`) at 5 horizons,
+  validated on the **gated slice**, not the whole market. Only `clears` earns its
+  place (see finding #6); expected value pairs its probability with the gate's
+  measured payoff profile, stored in the artifact by `evaluate.payoff_profile`.
+- **Robust daily price** — the day's median with an outlier guard, used by the
+  dataset *and* the scorecard so labels and grading can never disagree again.
+- **Alpha in the scorecard, dashboard and Discord**, plus one open position per card.
+
+### What to check in ~3 weeks (the whole point)
+1. `futmarket scorecard` / dashboard Track record. **Read `alpha_vs_market_pct`
+   first**, then `return_on_capital_pct`. The gate is very selective (~2,800
+   opportunities across the whole season), so trades accumulate slowly.
+2. If alpha is **solidly positive** → the edge is real; consider loosening
+   `entry_z_max` toward −1.0 to trade more, and re-run `futmarket evaluate` to
+   confirm the looser gate still clears costs.
+3. If alpha is **around zero** → the signal is real but execution is eating it.
+   Check whether the cards are actually fillable at the quoted band; raise
+   `buy_premium_pct` in config.yaml to the truth and re-evaluate.
+4. If alpha is **negative** → the gate is overfit to the season. Re-run
+   `futmarket evaluate --gate all` including the newest month and look at which
+   months carry it (2026-06 is exceptional; 2025-10 is negative for every gate).
 
 ### Open items / next moves (roughly by value)
 - **Prove it live** (above) — nothing to build, just read the number.
-- **Social + promo-type signals** are wired but sparse; they sharpen automatically
-  as data accumulates. Re-measure their model lift once weeks of data exist.
-- **News *content*** beyond promo type (what a specific announcement said) is still
-  unbuilt — the largest remaining research bet.
+- **Better price signal.** Real completed sales cover only ~2,000 of 8,231 cards.
+  The lowest-BIN snapshot is the noisiest input in the system and the biggest
+  remaining accuracy win; `sale-stats` coverage is the cheapest path to it.
+- **Event-driven moves.** Mean reversion pays ~5-10% over a fortnight. A promo
+  release crash is −33% over four days. Far larger, and the release curve is
+  already measured (§3) — it just isn't traded.
+- **Make the magnitude head work, or drop it.** `excess` currently has negative
+  skill (finding #6). Either better inputs fix it (real sale prices, event
+  features) or it should go — carrying a head nothing consumes is a liability,
+  because the next person will assume it works.
+- **News *content*** beyond promo type is still unbuilt — the largest research bet.
 - **Retrain cadence:** the 2-hourly cycle does NOT retrain. Retrain manually
-  (`futmarket train`, ~8 min) after meaningful new data, or add a weekly retrain.
-- **Watch out:** `dip_v1` picks are horizon-5, legacy are horizon-7 (that's how the
-  migration back-tagged them). Keep bumping `STRATEGY_VERSION` in `ml/picks.py` if
-  the trade logic changes again, so the record stays honest.
+  (`futmarket train`, ~30 min now) after meaningful new data, or add a weekly one.
+- **Watch out:** bump `STRATEGY_VERSION` in `ml/picks.py` whenever the trade logic
+  changes, so the record stays honest. `dip_v1_broken` and `legacy` are excluded
+  from every headline but kept in the DB.
 
 ### Running state
 Mac must stay **awake + plugged in** (LaunchAgents: `awake`, `dashboard`, `ml`).

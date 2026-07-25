@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+from collections import Counter
 
 from .. import db
 from ..config import Config
@@ -30,14 +31,20 @@ def _collect_bulk(conn, config: Config) -> str:
 
 def _run_picks(conn, config: Config) -> str:
     from ..ml import picks
-    found = picks.generate(
+    found = picks.generate_all(
         conn, source=config.source, tax_rate=config.tax_rate,
-        max_price=config.max_price, entry_z_max=config.entry_z_max,
-        entry_floor_max_pct=config.entry_floor_max_pct,
+        sell_slippage_pct=config.sell_slippage_pct,
+        buy_premium_pct=config.buy_premium_pct,
+        max_price=config.max_price,
         stop_buffer_pct=config.stop_buffer_pct, stop_min_pct=config.stop_min_pct,
-        stop_max_pct=config.stop_max_pct, min_reward_risk=config.min_reward_risk)
+        stop_max_pct=config.stop_max_pct, min_reward_risk=config.min_reward_risk,
+        min_expected_net_pct=config.min_expected_net_pct)
     n = picks.save(conn, found)
-    return f"{len(found)} candidates, {n} newly recorded"
+    if not found:
+        return "nothing clears the round trip today — sit out"
+    by_strategy = Counter(p.strategy for p in found)
+    detail = ", ".join(f"{v} {k}" for k, v in by_strategy.items())
+    return f"{len(found)} candidates ({detail}), {n} newly recorded"
 
 
 def _grade(conn, config: Config) -> str:
@@ -64,12 +71,20 @@ def _train(conn, config: Config) -> str:
     from ..ml import train
     r = train.train(conn, source=config.source, horizon=config.horizon_days,
                     stop_buffer_pct=config.stop_buffer_pct,
-                    stop_min_pct=config.stop_min_pct, stop_max_pct=config.stop_max_pct)
+                    stop_min_pct=config.stop_min_pct, stop_max_pct=config.stop_max_pct,
+                    tax_rate=config.tax_rate,
+                    sell_slippage_pct=config.sell_slippage_pct,
+                    buy_premium_pct=config.buy_premium_pct)
     if "error" in r:
         return r["error"]
-    d = r.get("direction", {})
-    return (f"trained on {r['rows']:,} rows · "
-            f"top-pick precision {d.get('precision_at_top_decile', 0) * 100:.0f}%")
+    # Report the precision on the slice the strategy actually trades -- the
+    # overall figure looked healthy while live picks went 0-for-26.
+    d = r.get("clears", {}).get(config.horizon_days, {})
+    gated = d.get("gated_precision")
+    if gated is None:
+        return f"trained on {r['rows']:,} rows · traded slice too thin to judge yet"
+    return (f"trained on {r['rows']:,} rows · on the cards we'd trade, "
+            f"{gated * 100:.0f}% pay off vs {d['gated_base_rate'] * 100:.0f}% at random")
 
 
 def _trader_tips(conn, config: Config) -> str:

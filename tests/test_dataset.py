@@ -32,7 +32,14 @@ def _seed_many(conn, n=6, days=40, base=10_000):
 
 # ---- daily loading --------------------------------------------------------
 
-def test_load_daily_takes_last_price_per_day(conn):
+def test_load_daily_takes_the_median_price_per_day(conn):
+    """The day's median, not its last snapshot.
+
+    What we record is the cheapest live listing at a moment in time. Taking the
+    last one made day-to-day returns swing with a std of 193%; the median brings
+    it to 41%. More than half this market's apparent volatility was an artifact
+    of when the collector happened to run.
+    """
     futdb.upsert_card_meta(conn, {"player_id": "p1", "rating": 84})
     for hour, price in ((9, 100), (13, 120), (20, 150)):
         futdb.insert_snapshot(conn, player_id="p1", price=price, source="futgg",
@@ -40,7 +47,33 @@ def test_load_daily_takes_last_price_per_day(conn):
     conn.commit()
     daily = dataset.load_daily_prices(conn, min_history_days=1)
     assert len(daily) == 1
-    assert daily["price"].iloc[0] == 150      # last observation of the day
+    assert daily["price"].iloc[0] == 120      # the median, not the 150 close
+    assert daily["n_snapshots"].iloc[0] == 3
+
+
+def test_load_daily_ignores_a_bad_print(conn):
+    """A discard-price or mispriced listing must not become the day's price."""
+    futdb.upsert_card_meta(conn, {"player_id": "p1", "rating": 84})
+    for hour, price in ((9, 10_000), (13, 200), (17, 10_400), (20, 10_200)):
+        futdb.insert_snapshot(conn, player_id="p1", price=price, source="futgg",
+                              at=START.replace(hour=hour))
+    conn.commit()
+    daily = dataset.load_daily_prices(conn, min_history_days=1)
+    assert daily["price"].iloc[0] == 10_200   # the 200 print is dropped
+
+
+def test_market_features_separate_a_cards_move_from_the_markets(conn):
+    """The fact the old feature set could not express: a card that fell 4% on a
+    day everything fell 9% is strong, not weak."""
+    frame = pd.DataFrame({
+        "player_id": ["a", "b", "c"],
+        "date": ["2026-01-02"] * 3,
+        "price": [100.0, 100.0, 100.0],
+        "ret_1d": [-4.0, -9.0, -14.0],
+    })
+    out = dataset.add_market_features(frame, horizons=(1,))
+    assert out["market_ret_1d"].iloc[0] == -9.0          # the median card
+    assert out["excess_ret_1d"].tolist() == [5.0, 0.0, -5.0]
 
 
 def test_short_history_cards_dropped(conn):
@@ -176,3 +209,16 @@ def test_behaviour_features_handle_categorical_dates():
     out = dataset.add_behaviour_features(frame)
     assert list(out["day_of_week"]) == [4, 0]
     assert list(out["days_since_card_release"]) == [7, 10]
+
+
+def test_special_cards_are_flagged_for_the_release_trade():
+    """Only promo/special cards have a release curve worth trading — a Common is
+    'released' at launch and never crashes. Pooled with 6,400 base golds the
+    effect disappears."""
+    frame = pd.DataFrame({
+        "player_id": list("abcd"), "date": ["2026-01-02"] * 4,
+        "price": [100.0] * 4, "release_date": ["2026-01-01"] * 4,
+        "version": ["Common", "Rare", "Team of the Season", "Icon"],
+    })
+    out = dataset.add_behaviour_features(frame)
+    assert out["is_special"].tolist() == [0.0, 0.0, 1.0, 1.0]

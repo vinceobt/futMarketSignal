@@ -87,8 +87,57 @@ def summarise_sales(sales: list[tuple], listed: int | None) -> dict | None:
 
 
 # You pay slightly over the cheapest listing to actually get filled -- measured at
-# ~1.04x on liquid cards. This is the realistic window above the live price.
+# ~1.07x on liquid (tier A) cards. This is the realistic window above the live price.
+#
+# Note it does NOT belong in `buy_premium_pct` in config.yaml. Both our price
+# series and our exit are the *listing* index: you buy at ~1.07x the listing and
+# you also sell at ~1.07x the listing, because a seller lists into the same going
+# rate. The premium is symmetric and cancels over a round trip; only the tax and
+# the slippage from listing slightly under to get filled are real costs. Charging
+# the premium on the buy alone would double-count it and reject every trade.
 BUY_OVER_LISTED_PCT = 5.0
+
+# The real-sales price series, banked alongside the listing series. Kept under a
+# separate source so both can be built, compared, and traded independently.
+SOLD_SOURCE = "futgg_sold"
+
+
+def bank_sold_prices(conn, player_id: str, sales: list[tuple], *,
+                     source: str = SOLD_SOURCE) -> int:
+    """Store completed-sale prices as a price series in their own right.
+
+    The single biggest weakness in this system is that everything is built on the
+    *lowest listing* -- one number, set by whoever is currently most desperate,
+    sampled at whatever moment the collector happened to run. Its day-to-day
+    return standard deviation is 193%. Real transactions are what the market
+    actually agreed on.
+
+    Each fetch returns ~100 completed sales spanning up to ~15 hours, so every
+    sweep banks the better part of a day of genuine transaction history per card
+    -- and it accumulates. Once there are weeks of it, `--source futgg_sold`
+    feeds the whole existing pipeline (features, labels, evaluate, train) with no
+    further work, and the noise claim becomes directly testable.
+
+    Sales are collapsed to an hourly median: individual transactions are spiky
+    (a single panic sale is not the going rate), and the hour is the finest grain
+    the downstream daily aggregation can use anyway.
+    """
+    if not sales:
+        return 0
+    from statistics import median
+
+    by_hour: dict = {}
+    for when, price in sales:
+        if not price or price <= 0:
+            continue
+        by_hour.setdefault(when.replace(minute=0, second=0, microsecond=0),
+                           []).append(int(price))
+    stored = 0
+    for hour, prices in by_hour.items():
+        db.insert_snapshot(conn, player_id=player_id,
+                           price=int(round(median(prices))), source=source, at=hour)
+        stored += 1
+    return stored
 
 
 def buy_band(stats, *, listed_price: int | None = None,
@@ -120,12 +169,21 @@ def refresh_sale_stats(conn, *, title: str = "fc26", limit: int | None = None,
                        client: httpx.Client | None = None,
                        progress: Callable[[dict], None] | None = None) -> dict:
     """Fetch real sale data for tradeable cards and store the going-rate stats."""
+    # Stalest first, not most-liquid first. Ordering by liquidity meant a capped
+    # run re-fetched the same top cards every cycle and coverage never grew past
+    # the head of the list -- fine for keeping a buy band fresh, useless for
+    # building sale history across the universe. Never-fetched cards sort first
+    # (empty string), then least-recently-refreshed, with liquidity only as a
+    # tiebreak. Each run therefore advances coverage and the whole universe
+    # round-robins on its own.
     rows = conn.execute(
         f"""SELECT m.player_id, m.definition_id, m.title
-            FROM card_meta m LEFT JOIN liquidity l ON l.player_id = m.player_id
+            FROM card_meta m
+            LEFT JOIN liquidity l ON l.player_id = m.player_id
+            LEFT JOIN sale_stats s ON s.player_id = m.player_id
             WHERE m.title = ? AND m.tradeable = 1 AND m.definition_id IS NOT NULL
               AND COALESCE(l.tier, 'Z') IN ({','.join('?' for _ in min_tier)})
-            ORDER BY COALESCE(l.score, -1) DESC""",
+            ORDER BY COALESCE(s.computed_at, '') ASC, COALESCE(l.score, -1) DESC""",
         (title, *min_tier),
     ).fetchall()
     if limit:
@@ -133,7 +191,7 @@ def refresh_sale_stats(conn, *, title: str = "fc26", limit: int | None = None,
 
     own = client is None
     client = client or httpx.Client(timeout=25.0, headers=history_source._HEADERS)
-    res = {"cards": 0, "stored": 0, "thin": 0, "failed": 0}
+    res = {"cards": 0, "stored": 0, "thin": 0, "failed": 0, "sold_points": 0}
     consecutive = 0
     try:
         for card in rows:
@@ -162,6 +220,12 @@ def refresh_sale_stats(conn, *, title: str = "fc26", limit: int | None = None,
                     break
                 continue
             consecutive = 0
+
+            # Bank the raw transactions as a price series before summarising:
+            # even a card too thin for reliable percentiles contributes real
+            # trades to the history we are trying to build.
+            res["sold_points"] += bank_sold_prices(conn, card["player_id"],
+                                                   detail["sales"])
 
             stats = summarise_sales(detail["sales"], detail.get("current"))
             if stats is None:

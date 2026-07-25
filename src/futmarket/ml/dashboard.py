@@ -153,6 +153,10 @@ def _pick_card(row) -> str:
     band = (f"{_fmt(row['buy_low'])} – {_fmt(row['buy_high'])}"
             if row["buy_low"] else f"~{_fmt(entry)}")
     conf = round((row["confidence"] or 0) * 100)
+    # How long this trade was given. The mean-reversion edge only clears the
+    # round trip over a week or two, so the hold is part of the call.
+    hold = (f"~{row['chosen_horizon_days']}d" if row["chosen_horizon_days"]
+            else f"~{row['horizon_days']}d")
     sph = f"{row['sales_per_hour']:.0f}/hr" if row["sales_per_hour"] else "—"
     upside = round((row["target_price"] / entry - 1) * 100) if entry else 0
     reasons = "".join(f"<li>{_esc(r)}</li>"
@@ -177,6 +181,7 @@ def _pick_card(row) -> str:
     <div><dt>Buy</dt><dd class="buy">{band}</dd></div>
     <div><dt>Sell</dt><dd class="sell">{_fmt(row["target_price"])}<span class="pct">+{upside}%</span></dd></div>
     <div><dt>Stop</dt><dd class="stop">{_fmt(row["stop_price"])}</dd></div>
+    <div><dt>Hold</dt><dd>{hold}</dd></div>
     <div><dt>Sells</dt><dd>{sph}</dd></div>
   </dl>
   <ul class="why">{reasons}</ul>
@@ -250,31 +255,63 @@ def render_group_read(read) -> str:
             f'<h4>Best buys in the group</h4>{opp_html}</div>')
 
 
-def _legacy_line(legacy) -> str:
-    if not legacy or not legacy.get("graded"):
-        return ""
-    return (f'<p class="legacy-note">Legacy (old +25%/−8% engine, excluded above): '
-            f'{legacy["graded"]} graded · {legacy["return_on_capital_pct"]:+.1f}% '
-            f'on capital · {legacy["win_rate"]*100:.0f}% win</p>')
+_SUPERSEDED = {
+    "legacy": "old +25%/−8% engine",
+    "dip_v1_broken": "dip strategy, graded with stops that sat above the market price",
+}
+
+_STRATEGY_LABELS = {
+    "release_v1": "Release crash — promo cards 4–6 days old, held ~3 weeks",
+    "relval_v1": "Deep dip — oversold cards on their floor, held ~2 weeks",
+}
 
 
-def render_scorecard_full(sc, graded_rows, *, legacy=None) -> str:
-    """The honest track record: coin-weighted stats + recent graded trades, judged
-    on the current strategy; the old engine's record shown muted beneath."""
+def _legacy_line(*summaries) -> str:
+    """Superseded strategies, shown muted so nothing is hidden.
+
+    dip_v1 belongs here rather than in the headline: its stops were derived from
+    a marked-up entry and compared against the raw price series, so they landed
+    on average 0.76% *above* the live price. 53 of 59 trades stopped out before
+    they began — that record measures a bug, not a strategy.
+    """
+    out = ""
+    for s in summaries:
+        if not s or not s.get("graded"):
+            continue
+        label = _SUPERSEDED.get(s.get("strategy", ""), s.get("strategy", "superseded"))
+        out += (f'<p class="legacy-note">{_esc(label)} (excluded above): '
+                f'{s["graded"]} graded · {s["return_on_capital_pct"]:+.1f}% '
+                f'on capital · {s["win_rate"]*100:.0f}% win</p>')
+    return out
+
+
+def render_scorecard_full(sc, graded_rows, *, superseded=()) -> str:
+    """The honest track record for ONE strategy: coin-weighted stats + recent
+    graded trades. Superseded strategies shown muted beneath if passed."""
     if not sc.get("graded"):
-        return (f'<p class="empty">{sc.get("total", 0)} current-strategy picks '
-                f'recorded, {sc.get("closed", 0)} resolved — none graded yet. The '
-                f'record fills in as the new picks mature.</p>{_legacy_line(legacy)}')
+        return (f'<p class="empty">{sc.get("total", 0)} picks recorded, '
+                f'{sc.get("closed", 0)} resolved — none graded yet. The record '
+                f'fills in as the picks mature.</p>'
+                f'{_legacy_line(*superseded)}')
 
     def stat(k, n, s):
         return f'<div class="stat"><div class="k">{k}</div><div class="n">{n}</div><div class="s">{s}</div></div>'
 
-    stats = (stat("Return on capital", f'{sc["return_on_capital_pct"]:+.1f}%',
-                  "the number that matters")
+    # Alpha leads. The median tradeable card doesn't move at all over a
+    # fortnight, so after the ~7.4% round trip a flat market already reads as
+    # -6.9%: absolute return alone cannot tell a good call in a bad month from a
+    # bad call. Return on capital stays beside it — it is what you actually keep.
+    alpha = sc.get("alpha_vs_market_pct")
+    alpha_stat = (stat("Alpha vs market", f'{alpha:+.1f}%',
+                       f'{sc.get("benchmarked", 0)} benchmarked')
+                  if alpha is not None else
+                  stat("Alpha vs market", "—", "no benchmarked trades yet"))
+    stats = (alpha_stat
+             + stat("Return on capital", f'{sc["return_on_capital_pct"]:+.1f}%',
+                    "what you actually keep")
              + stat("Win rate", f'{sc["win_rate"]*100:.0f}%', f'{sc["graded"]} graded')
              + stat("Total P&amp;L", f'{sc["coins_pnl"]:+,}',
-                    f'{sc["avg_coins_per_trade"]:+,}/trade')
-             + stat("Median trade", f'{sc["median_return_pct"]:+.1f}%', "net of tax"))
+                    f'{sc["avg_coins_per_trade"]:+,}/trade'))
 
     rows = ""
     for g in graded_rows:
@@ -289,7 +326,7 @@ def render_scorecard_full(sc, graded_rows, *, legacy=None) -> str:
     table = (f'<table class="record"><thead><tr><th>Card</th><th>Entry</th>'
              f'<th>Outcome</th><th>Net</th></tr></thead><tbody>{rows}</tbody></table>'
              if rows else "")
-    return f'<div class="stats4">{stats}</div>{table}{_legacy_line(legacy)}'
+    return f'<div class="stats4">{stats}</div>{table}{_legacy_line(*superseded)}'
 
 
 CONTROLS = [
@@ -316,9 +353,8 @@ def holding_fragment(conn, *, source: str = "futgg", title: str = "fc26") -> str
     """Open positions from the current strategy: where each sits vs its target,
     and a SELL flag when it's there. Derived live from pick_log + latest prices."""
     from ..services.notify import NEAR_TARGET
-    from .picks import STRATEGY_VERSION
     picks = [p for p in db.open_picks(conn, title=title)
-             if p["strategy"] == STRATEGY_VERSION]
+             if p["strategy"] in scorecard.CURRENT_STRATEGIES]
     if not picks:
         return ('<p class="empty">No open positions from the current strategy. '
                 'Picks you save appear here until they hit target or stop.</p>')
@@ -361,18 +397,28 @@ def picks_fragment(conn, *, title: str = "fc26", limit: int = 12) -> str:
 
 
 def record_fragment(conn, *, title: str = "fc26") -> str:
-    """The full track-record HTML — judged on the current strategy, legacy shown
-    muted beneath so nothing is hidden."""
-    from .picks import STRATEGY_VERSION
-    sc = scorecard.summary(conn, title=title, strategy=STRATEGY_VERSION)
-    graded = conn.execute(
-        """SELECT p.player_id, p.entry_price, p.status, p.realized_pct, m.name
-           FROM pick_log p LEFT JOIN card_meta m ON m.player_id = p.player_id
-           WHERE p.title = ? AND p.strategy = ?
-             AND p.status IN ('target','stop','expired') AND p.entry_price >= 1000
-           ORDER BY p.scored_at DESC LIMIT 12""", (title, STRATEGY_VERSION)).fetchall()
-    legacy = scorecard.summary(conn, title=title, strategy="legacy")
-    return render_scorecard_full(sc, graded, legacy=legacy)
+    """The track record — **one block per live strategy**, never blended.
+
+    A deep dip and a promo release crash are different bets with different
+    payoffs; a single combined number would let one carry the other and hide
+    which is actually working. Superseded strategies stay muted beneath so
+    nothing is hidden.
+    """
+    superseded = [scorecard.summary(conn, title=title, strategy=s)
+                  for s in _SUPERSEDED]
+    blocks = []
+    for name in scorecard.CURRENT_STRATEGIES:
+        sc = scorecard.summary(conn, title=title, strategy=name)
+        graded = conn.execute(
+            """SELECT p.player_id, p.entry_price, p.status, p.realized_pct, m.name
+               FROM pick_log p LEFT JOIN card_meta m ON m.player_id = p.player_id
+               WHERE p.title = ? AND p.strategy = ?
+                 AND p.status IN ('target','stop','expired') AND p.entry_price >= 1000
+               ORDER BY p.scored_at DESC LIMIT 8""", (title, name)).fetchall()
+        blocks.append(f'<h4 class="strat">{_esc(_STRATEGY_LABELS.get(name, name))}</h4>'
+                      + render_scorecard_full(sc, graded))
+    # Superseded records are shown once, after every live strategy.
+    return "".join(blocks) + _legacy_line(*superseded)
 
 
 # --------------------------------------------------------------------- render
@@ -457,7 +503,7 @@ def render(conn, *, source: str = "futgg", title: str = "fc26",
 
     from .picks import STRATEGY_VERSION
     sc = scorecard.summary(conn, title=title, strategy=STRATEGY_VERSION)
-    run = db.latest_model_run(conn, kind="direction", title=title)
+    run = db.latest_model_run(conn, kind="clears", title=title)
     metrics = {}
     if run and run["metrics_json"]:
         import json

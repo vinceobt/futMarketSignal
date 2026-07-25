@@ -29,32 +29,75 @@ RETURN_HORIZONS = (1, 3, 7, 14)
 RANGE_WINDOW = 30          # days defining a card's "recent range"
 VOL_WINDOW = 14
 # Just enough history to compute a short return. Deliberately low: newly
-# released cards ARE the trade -- a promo card crashes ~33% over four days and
-# bottoms around day nine, which is precisely the release_phase feature. A 20-day
-# minimum made every card in its release window invisible to the model, excluding
-# the single most tradeable pattern in the game.
-MIN_HISTORY_DAYS = 3
+# released cards ARE the trade -- the `release` gate buys a promo card on day 4-6
+# of its crash, which measured +11.5% net at +25pp of alpha. A 20-day minimum
+# once made every card in its release window invisible, excluding the single most
+# tradeable pattern in the game.
+#
+# Kept at 2 rather than 3 as slack against collection lag: a card released on
+# Friday whose first snapshot lands a day late still has two days of history by
+# day 4, and stays tradeable in its best window. Rolling stats need
+# ``min_periods`` anyway, so a barely-observed card simply carries NaN features
+# -- the gates require the columns they use to be non-null, so it can only be
+# picked up by a strategy that doesn't need them.
+MIN_HISTORY_DAYS = 2
+# A snapshot this many times away from the day's median is a bad print (a discard
+# price, a mispriced listing), not the market. Wide enough to keep genuine
+# intraday swings -- the median card-day already ranges 14%.
+OUTLIER_FACTOR = 3.0
+# Horizons over which the market-wide drift is measured.
+MARKET_HORIZONS = (1, 3, 7)
+# fut.gg's version names for base cards. Everything else is a promo/special,
+# which is what has a tradeable release curve.
+BASE_VERSIONS = ("Common", "Rare")
 
 
 def load_daily_prices(conn, *, source: str = "futgg", title: str = "fc26",
-                      min_history_days: int = MIN_HISTORY_DAYS) -> pd.DataFrame:
-    """Daily last price per card, long format: player_id, date, price."""
+                      min_history_days: int = MIN_HISTORY_DAYS,
+                      outlier_factor: float = OUTLIER_FACTOR) -> pd.DataFrame:
+    """Daily **robust** price per card: player_id, date, price, n_snapshots.
+
+    The day's *median* snapshot, not its last. This is not a stylistic choice --
+    it is the single cheapest accuracy win available here. What we record is the
+    cheapest live listing at a moment in time, and on a card trading hundreds of
+    times an hour that is a jittery statistic: one stale or mispriced listing sets
+    the number. Measured over the season:
+
+        last snapshot   day-to-day return std 193%, median move 14.6%
+        day's median    day-to-day return std  41%, median move  8.2%
+
+    More than half the apparent volatility of this market was an artifact of
+    sampling. Everything downstream -- the z-score that defines "the dip", the
+    barriers, the labels -- was built on that noise.
+
+    Snapshots more than ``outlier_factor``x away from the day's median in either
+    direction are dropped first: those are discard-price prints and mispriced
+    listings, not the market. ``n_snapshots`` records how well-observed the day
+    was, so a single-print day can be treated with the suspicion it deserves.
+    """
     rows = conn.execute(
         """SELECT s.player_id, s.timestamp, s.price
            FROM price_snapshots s
            JOIN card_meta c ON c.player_id = s.player_id
-           WHERE s.source = ? AND c.title = ?""",
+           WHERE s.source = ? AND c.title = ? AND s.price > 0""",
         (source, title),
     ).fetchall()
     if not rows:
-        return pd.DataFrame(columns=["player_id", "date", "price"])
+        return pd.DataFrame(columns=["player_id", "date", "price", "n_snapshots"])
 
     df = pd.DataFrame(rows, columns=["player_id", "timestamp", "price"])
     df["ts"] = pd.to_datetime(df["timestamp"], format="ISO8601", utc=True)
     df = df.sort_values("ts")
     df["date"] = df["ts"].dt.strftime("%Y-%m-%d")
-    daily = (df.groupby(["player_id", "date"], observed=True)["price"]
-             .last().reset_index())
+
+    keys = ["player_id", "date"]
+    rough = df.groupby(keys, observed=True)["price"].transform("median")
+    keep = (df["price"] <= rough * outlier_factor) & (df["price"] >= rough / outlier_factor)
+    df = df[keep]
+
+    daily = (df.groupby(keys, observed=True)["price"]
+             .agg(price="median", n_snapshots="size").reset_index())
+    daily["price"] = daily["price"].round().astype("int64")
 
     counts = daily.groupby("player_id", observed=True)["price"].transform("size")
     daily = daily[counts >= min_history_days]
@@ -64,6 +107,32 @@ def load_daily_prices(conn, *, source: str = "futgg", title: str = "fc26",
     for col in ("player_id", "date"):
         daily[col] = daily[col].astype("category")
     return daily
+
+
+def add_market_features(frame: pd.DataFrame, *, horizons=MARKET_HORIZONS
+                        ) -> pd.DataFrame:
+    """What the market as a whole is doing, and how this card compares.
+
+    The fact this codebase never represented: **most cards do nothing, and the
+    market moves as a block when it moves at all.** The median tradeable card's
+    14-day price change is zero, while whole months (2025-09, 2026-02) drop 20-50%
+    together. A model asked to predict absolute moves spends its capacity on that
+    common drift instead of on what makes one card differ from another.
+
+    So we hand the model the drift explicitly (``market_ret_{h}d``) and, more
+    usefully, the part of a card's move that is *its own* (``excess_ret_{h}d``).
+    A card that fell 4% on a day the market fell 9% is strong, and nothing in the
+    old feature set could say so.
+    """
+    out = frame.copy()
+    for h in horizons:
+        own = f"ret_{h}d"
+        if own not in out.columns:
+            continue
+        market = out.groupby("date", observed=True)[own].transform("median")
+        out[f"market_ret_{h}d"] = market.astype("float32")
+        out[f"excess_ret_{h}d"] = (out[own] - market).astype("float32")
+    return out
 
 
 def add_card_features(daily: pd.DataFrame) -> pd.DataFrame:
@@ -141,6 +210,14 @@ def add_behaviour_features(frame: pd.DataFrame) -> pd.DataFrame:
             out["days_since_card_release"],
             bins=[-np.inf, 0, 2, 5, 11, 21, np.inf],
             labels=[0, 1, 2, 3, 4, 5]).astype("float")
+    if "version" in out.columns:
+        # A promo/special card, as opposed to a base gold. Only these have a
+        # release curve worth trading: a Common or Rare is "released" the day the
+        # game launches and never crashes. Measured on special cards alone, the
+        # curve is a clean +7 to +10pp of alpha; pooled with base golds it
+        # disappears into 6,400 cards that never had a release event.
+        out["is_special"] = (~out["version"].astype(str)
+                             .isin(BASE_VERSIONS)).astype("float32")
     return out
 
 
@@ -208,6 +285,9 @@ def build_dataset(conn, *, source: str = "futgg", title: str = "fc26",
         return daily
 
     frame = add_card_features(daily)
+    # The market's own drift, before cohorts: "did this card fall less than
+    # everything else" is the question the whole strategy now turns on.
+    frame = add_market_features(frame)
     frame = frame.merge(_attributes(conn, title), on="player_id", how="left")
     frame = add_behaviour_features(frame)
 
@@ -255,9 +335,14 @@ FEATURE_COLUMNS = (
        "days_to_next_announce", "days_since_last_announce",
        "is_weekend_window", "rating", "liq_score", "liq_updates_per_day"]
     # the weekly rhythm and the release curve -- see add_behaviour_features
-    + ["day_of_week", "days_since_card_release", "release_phase"]
+    + ["day_of_week", "days_since_card_release", "release_phase", "is_special"]
     # social buzz (Reddit/YouTube/X) -- sparse today, grows over time
     + ["buzz_mentions", "buzz_sentiment", "buzz_z"]
     # what kind of news: distance to the big market-moving promos
     + ["days_since_major_promo", "days_to_major_promo"]
+    # the market's own drift, and how much of this card's move is its own
+    + [f"market_ret_{h}d" for h in MARKET_HORIZONS]
+    + [f"excess_ret_{h}d" for h in MARKET_HORIZONS]
+    # how well-observed today's price is -- a one-print day is barely evidence
+    + ["n_snapshots"]
 )
