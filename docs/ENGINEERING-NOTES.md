@@ -42,7 +42,7 @@ Working, end to end, with a **command-center dashboard** you run everything from
 | Event calendar | 247 events; promos classified by **type** (Icon/Hero/TOTS/…) |
 | Features | card behaviour + cohorts + lifecycle + weekly rhythm + release curve + social buzz + major-promo distance + **market drift / excess return** |
 | Models | scikit-learn HistGradientBoosting — **excess** + **clears-cost** heads, one per horizon (3/5/7/10/14/21d) |
-| Strategies | **`release_v1`** (promo card 4–6 days into its release crash, held ~3 weeks) and **`relval_v1`** (deep dip, z ≤ −1.5 on its 30-day floor, held ~2 weeks). Near-disjoint (2.3% overlap); judged separately. |
+| Strategies | **`release_v1`** (promo card 4–6 days into its release crash, held ~3 weeks), **`relval_v1`** (deep dip, z ≤ −1.5 on its 30-day floor, held ~2 weeks) and **`weekend_v1`** (a tier-A card that swings ≥30% weekly, bought Sat/Sun, sold 3–4 days later). Near-disjoint; judged separately. |
 | Prices | listing index (`futgg`) **+ real completed sales banked as their own series (`futgg_sold`)** |
 | Output | `futmarket picks` · `futmarket advise` (consult) · **`futmarket evaluate`** (the honest scoreboard) · dashboard `/ml` |
 
@@ -107,9 +107,65 @@ magnitude head; it is still trained and reported so we notice if it ever starts
 working. This is why `picks._choose_horizon` takes probabilities and a payoff
 profile rather than a predicted return.
 
-**Honest status:** `relval_v1` backtests positive but is **not yet proven live** —
-it starts recording picks on 2026-07-25. Backtests flatter; the coin-weighted
-scorecard, read as **alpha**, is the real judge. See §10.
+**8. The weekly cycle is only tradeable on the cards that actually swing.**
+Prices sag into the weekend as rewards flood the market and recover midweek. The
+direction is the strongest day pattern there is — every one of the six best
+buy/sell day pairs is a weekend buy — but on the average card the best pair
+(Sunday→Thursday) is **+4.60% gross, −2.62% net**. Buying "the weekend" as a
+blanket rule loses money for exactly the reason `dip_v1` did.
+
+What makes it a trade is that the swing is a property of the **individual card**
+and it persists week to week. Bucketing each weekend trade by that card's *own*
+trailing swing (prior weeks only):
+
+| Card's past swing | next trade, net |
+|---|---|
+| 0–5% | −3.18% |
+| 10–15% | +1.18% |
+| 20–25% | +6.89% |
+| 30–35% | **+19.57%** |
+
+So the rule is **"buy the cards that breathe, in the weekend"** — most cards are
+inert, some swing 20%+ every single week. Two things settle the shape of it:
+
+- **The sell day is 3–4 days out, and holding longer gives it all back.** On tier
+  A at a swing floor of 30: hold 2d −2.9%, **3d +2.4%, 4d +4.2%**, 5d −0.1%,
+  6d −6.9%, 7d −14.1%. By day 7 the card is simply back in the next weekend dump.
+  Measured, not assumed — the horizon list carries 2/3/4/5/6 so every midweek
+  exit could be graded, and the model picks between 3, 4 and 5 per card.
+- **The swing floor has to be high, and tier A is the tell.** At swing ≥10 the
+  blend is −1.9% net and tier A is *worse* than tier B — the artifact signature.
+  Raising the floor inverts it: at ≥30, tier A nets **+4.2% with +16.7pp alpha
+  and a 59% win rate over 1,059 trades**, while tier B nets −4.7%. Trading tier A
+  alone is the difference between a trade and a mirage.
+
+Note the trap this walks past: alpha alone would have shipped the ≥10 version,
+which beats the market in 11 of 11 months and still **loses coins**. You cannot
+spend alpha — the absolute number has to clear zero too.
+
+The trained model then confirmed the sell day independently. Out of sample, on
+the gated slice, what the trade actually pays:
+
+| hold | 2d | 3d | **4d** | 5d | 6d | 7d | 14d |
+|---|---|---|---|---|---|---|---|
+| pays off | 47% | 58% | **61%** | 52% | 41% | 32% | 27% |
+| blind EV | +0.6% | +4.9% | **+6.2%** | +2.1% | −7.1% | −14.1% | −19.3% |
+
+Both the win rate *and* the size of the loss get worse past 5 days (the median
+loss goes from −14.7% at 4d to −24.8% at 6d): hold into the next weekend and you
+are simply in the next dump. And `weekend_v1` is the only gate where the model
+has skill at **every** horizon (1.10x–1.38x over the base rate).
+
+**Which is more than can be said for the release gate.** The same training run
+puts `release` at **0.842x at 14 days and 0.978x at 21** — i.e. *worse than
+picking blind*, at exactly the two horizons `release_v1` trades. Its measured
+payoff is still strong, so the trade may work while the model's per-card call on
+it does not; but nothing should be added to that strategy until this is
+understood.
+
+**Honest status:** `relval_v1` and `weekend_v1` both backtest positive and are
+**not yet proven live**. Backtests flatter; the coin-weighted scorecard, read as
+**alpha**, is the real judge. See §10.
 
 The previous live record (`dip_v1`, 53 stops / 6 targets) measures a **bug, not a
 strategy** — see trap #11. Those rows are retagged `dip_v1_broken` and never
@@ -233,6 +289,25 @@ not by tests.
     40 minutes. Rate limits are real (§7). Collect in slices from the 2-hourly
     loop instead — 250 cards at 2s covers the universe in three days and then
     keeps it fresh.
+21. **A barrier trade exits at its barrier, not at the price that broke it.** The
+    scorer booked whichever daily price it happened to observe on the day a
+    barrier was crossed. Live, stops correctly placed at −15% were realizing
+    **−34.9%** (tail to −68%, prints as far as 57% *below* the stop), while
+    targets booked up to 54% *above* the target. It inflated wins and losses at
+    once and made the whole `relval_v1` record unreadable. Book the level; charge
+    genuine gap risk through `sell_slippage_pct`, where it can be measured.
+22. **The benchmark window must end when the trade did, not at its horizon.**
+    `_benchmark_pct` measured the market from entry to *horizon*, so a trade that
+    stopped out on day 2 of a 10-day horizon asked what the market did over a
+    window ending eight days in the future, got nothing back, and stored no
+    benchmark. All 89 `target`/`stop` rows had NULL `benchmark_pct` while the 46
+    `expired` ones — the ones that by construction went nowhere — had one. Alpha,
+    the headline number, was being computed from the third of the record least
+    able to show any.
+23. **Barriers must also be bounded by the horizon.** The scorer walked every
+    price after the pick, not just those inside its window. Combined with the
+    loop going dark for 48 hours (it has), a pick whose deadline passed unscored
+    got graded on whatever the card did *after* it should have been sold.
 
 ---
 
@@ -281,6 +356,7 @@ futmarket picks --min-sales-per-hour 5     # ← the product. both strategies, r
 futmarket picks --strategy release_v1      # just the promo release-crash trade
 futmarket evaluate --gate all              # ← would this rule have made money?
 futmarket scorecard                        # how past picks have actually done
+futmarket regrade --dry-run                # re-score closed picks after a grading change
 futmarket train                            # retrain (~30 min: 2 heads x 5 horizons)
 futmarket build-dataset                    # inspect the feature matrix
 futmarket sale-stats --tiers ABC           # real sold prices; banks the 'futgg_sold' series
@@ -357,14 +433,47 @@ Rate limits are real: use ~1.5–2s between per-card calls with exponential back
 
 ---
 
-## 10. Where we stopped (2026-07-25) — read this when you return
+## 10. Where we stopped (2026-08-05) — read this when you return
 
-The system was rebuilt around one finding: **the previous strategy could not have
-made money, and its live record measured a bug rather than a strategy.** The next
-move is **not more building — it's reading the alpha number after ~3 weeks of live
-`relval_v1` trades.**
+Two things happened on 2026-08-05, and the second is why the first matters.
 
-### What was wrong (all measured, all now fixed)
+**The live record was measuring the grader, not the strategies.** `relval_v1` had
+135 graded trades reading −14.8% on capital. Three defects, all now fixed and
+tested (traps #21–#23): trades were booked at whatever price broke a barrier
+rather than at the barrier, so stops set at −15% realized −34.9%; the benchmark
+window ran to the horizon rather than to the actual exit, so **89 of 135 rows had
+no benchmark at all** and alpha was computed from the 46 that went nowhere; and
+barrier walks weren't bounded by the horizon, so a pick left unscored during a
+loop outage got graded on what happened afterwards.
+
+All 142 closed rows were then re-scored under the fixed rules (`futmarket
+regrade`; the barriers and full price history are still in the DB, so this is
+exact, not an estimate). 96 changed, 4 changed verdict, and 96 gained the
+benchmark they never had. **The honest live record:**
+
+| Strategy | Graded | On capital | Alpha | Win |
+|---|---|---|---|---|
+| `release_v1` | 7 | **+8.6%** | **+15.5%** | 86% |
+| `relval_v1` | 137 | **−11.0%** | **−4.9%** | 23% |
+
+So the grading bug was real but it was not the whole story: correctly graded,
+`relval_v1` is still clearly losing (57 stops against 32 targets), and its alpha
+is negative on a sample big enough to believe. Per the decision tree below that
+means **the gate is overfit to the season** — it is the next thing to re-cut, and
+`futmarket evaluate --gate relval_v1` including 2026-07 and 2026-08 is where to
+start. `release_v1` is positive on both counts but 7 trades is not yet a record.
+
+**A third strategy was added — `weekend_v1`, the weekly supply cycle** (finding
+#8). Buy a tier-A card that swings ≥30% weekly on a Saturday or Sunday, sell 3–4
+days later: +4.2% net, +16.7pp alpha, 59% win over 1,059 trades. The sell day was
+derived rather than assumed — horizons 2/3/4/5/6 exist precisely so every midweek
+exit could be graded, and the curve peaks hard at 3–4 days and is deeply negative
+by 7.
+
+**The next move is still not building. It is reading the alpha number** — now
+that the grader can produce an honest one.
+
+### What was wrong in the 2026-07-25 rebuild (all measured, all fixed then)
 | Defect | Evidence |
 |---|---|
 | Stops landed **above** the market price | avg −0.76% "room"; 53 stops / 6 targets |
@@ -394,12 +503,13 @@ move is **not more building — it's reading the alpha number after ~3 weeks of 
 - **Alpha in the scorecard, dashboard and Discord**, plus one open position per card.
 
 ### What to check in ~3 weeks (the whole point)
-1. `futmarket scorecard` / dashboard Track record. **Read `alpha_vs_market_pct`
-   first**, then `return_on_capital_pct`. The gate is very selective (~2,800
-   opportunities across the whole season), so trades accumulate slowly.
-2. If alpha is **solidly positive** → the edge is real; consider loosening
-   `entry_z_max` toward −1.0 to trade more, and re-run `futmarket evaluate` to
-   confirm the looser gate still clears costs.
+1. `futmarket scorecard` / dashboard Track record — now printing **every** live
+   strategy, not just the first. **Read `alpha_vs_market_pct` first**, then
+   `return_on_capital_pct`. Trades accumulate slowly: the gates are selective,
+   and `weekend_v1` can only open on two days a week.
+2. If alpha is **solidly positive** → the edge is real; consider loosening the
+   gate to trade more (`entry_z_max` toward −1.0, or the weekend swing floor
+   toward 20), and re-run `futmarket evaluate` to confirm it still clears costs.
 3. If alpha is **around zero** → the signal is real but execution is eating it.
    Check whether the cards are actually fillable at the quoted band; raise
    `buy_premium_pct` in config.yaml to the truth and re-evaluate.
@@ -407,14 +517,29 @@ move is **not more building — it's reading the alpha number after ~3 weeks of 
    `futmarket evaluate --gate all` including the newest month and look at which
    months carry it (2026-06 is exceptional; 2025-10 is negative for every gate).
 
+**Check the absolute return too, not only alpha.** The weekend gate at a swing
+floor of 10 beats the market in 11 of 11 months and still loses coins. Alpha says
+the model knows something; only the absolute number says you made money.
+
 ### Open items / next moves (roughly by value)
 - **Prove it live** (above) — nothing to build, just read the number.
 - **Better price signal.** Real completed sales cover only ~2,000 of 8,231 cards.
   The lowest-BIN snapshot is the noisiest input in the system and the biggest
   remaining accuracy win; `sale-stats` coverage is the cheapest path to it.
+- **Re-grade or retire the pre-2026-08-05 record.** The 142 `relval_v1` /
+  `release_v1` rows graded under the broken barrier convention are still in
+  `pick_log` and still counted. Either re-run them through the fixed
+  `score_pick` (the barriers and the price series are both still there, so this
+  is exact) or retag them the way `dip_v1_broken` was. Leaving them is the worst
+  of the three — the headline currently blends honest and dishonest rows.
 - **Event-driven moves.** Mean reversion pays ~5-10% over a fortnight. A promo
-  release crash is −33% over four days. Far larger, and the release curve is
-  already measured (§3) — it just isn't traded.
+  release crash is −33% over four days. The release curve and the weekly cycle
+  are now both traded; **SBC fodder spikes, TOTW day and reward drops are not.**
+  Each is a candidate gate — add it to `evaluate.GATES` and run
+  `futmarket evaluate` before writing any strategy code.
+- **`generate_all` rebuilds the feature matrix once per strategy.** Three
+  strategies means three ~3-minute builds every 2-hourly cycle. Build once and
+  pass the frame in.
 - **Make the magnitude head work, or drop it.** `excess` currently has negative
   skill (finding #6). Either better inputs fix it (real sale prices, event
   features) or it should go — carrying a head nothing consumes is a liability,

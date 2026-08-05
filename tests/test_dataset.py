@@ -123,6 +123,68 @@ def test_no_feature_uses_future_rows():
         truncated[cols].reset_index(drop=True))
 
 
+# ---- the weekly cycle -----------------------------------------------------
+
+def _weekly(swings, *, start="2026-01-02", trough=1000):
+    """A card that dips into every weekend and recovers by the given %.
+
+    2026-01-02 is a Friday, so each block of 7 rows is one market week:
+    Fri/Sat/Sun at the trough, Mon-Thu recovering to the peak.
+    """
+    rows = []
+    day = pd.Timestamp(start)
+    for swing in swings:
+        peak = trough * (1 + swing / 100.0)
+        for offset, price in enumerate([trough] * 3 + [peak] * 4):
+            rows.append(((day + pd.Timedelta(days=offset)).strftime("%Y-%m-%d"),
+                         price))
+        day += pd.Timedelta(days=7)
+    return pd.DataFrame({"player_id": ["p"] * len(rows),
+                         "date": [d for d, _ in rows],
+                         "price": [p for _, p in rows]})
+
+
+def test_weekend_swing_measures_trough_to_peak():
+    out = dataset.add_weekend_features(_weekly([10, 10, 10, 10]))
+    # By the last week there are three prior weeks of a clean 10% swing.
+    assert round(out.iloc[-1]["weekend_swing_med"], 6) == 10.0
+    assert out.iloc[-1]["weekend_swing_n"] == 3
+
+
+def test_weekend_swing_never_sees_its_own_week():
+    """The week we would be buying in has its peak in the future."""
+    out = dataset.add_weekend_features(_weekly([10, 10, 40]))
+    # The 40% week must not raise its own number -- only the two 10% weeks count.
+    assert round(out.iloc[-1]["weekend_swing_med"], 6) == 10.0
+
+
+def test_weekend_swing_separates_a_card_that_breathes_from_one_that_does_not():
+    breathes = dataset.add_weekend_features(_weekly([25, 25, 25]))
+    inert = dataset.add_weekend_features(_weekly([0.5, 0.5, 0.5]))
+    assert breathes.iloc[-1]["weekend_swing_med"] > 20
+    assert inert.iloc[-1]["weekend_swing_med"] < 2
+
+
+def test_dist_to_week_trough_uses_only_prices_so_far():
+    out = dataset.add_weekend_features(_weekly([10]))
+    # Friday is the low itself; the Monday peak is 10% above the week's low.
+    assert out.iloc[0]["dist_to_week_trough_pct"] == 0.0
+    assert round(out.iloc[3]["dist_to_week_trough_pct"], 6) == 10.0
+
+
+def test_weekend_features_do_not_use_future_rows():
+    """The same guarantee the card features carry, for the weekly ones."""
+    frame = _weekly([10, 20, 15, 30, 5])
+    cols = ["weekend_swing_med", "weekend_swing_n", "weekend_swing_iqr",
+            "dist_to_week_trough_pct"]
+    full = dataset.add_weekend_features(frame)
+    cut = 21                                  # three whole weeks
+    truncated = dataset.add_weekend_features(frame.head(cut).copy())
+    pd.testing.assert_frame_equal(
+        full.head(cut)[cols].reset_index(drop=True),
+        truncated[cols].reset_index(drop=True))
+
+
 # ---- full assembly --------------------------------------------------------
 
 def test_build_dataset_joins_everything(conn):

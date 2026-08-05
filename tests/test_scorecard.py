@@ -35,17 +35,60 @@ def _fake_pick(**over):
 # ---- scoring one pick -----------------------------------------------------
 
 def test_target_hit_is_a_win_net_of_tax():
-    status, exit_price, realized = scorecard.score_pick(
+    status, exit_price, realized, _ = scorecard.score_pick(
         _fake_pick(), _daily([(1, 11_000), (2, 13_500)]),
         now=PICKED + timedelta(days=8))
-    assert status == scorecard.TARGET and exit_price == 13_500
+    # Books at the target, not at the 13,500 print that broke it: the sell is
+    # listed *at* 13,000, so that is where it fills.
+    assert status == scorecard.TARGET and exit_price == 13_000
     # net of 5% tax, not the gross move
-    assert round(realized, 4) == round((13_500 * 0.95 / 10_000 - 1) * 100, 4)
+    assert round(realized, 4) == round((13_000 * 0.95 / 10_000 - 1) * 100, 4)
+
+
+def test_a_trade_exits_at_its_barrier_not_at_the_price_that_broke_it():
+    """The bug that made the live record unreadable.
+
+    Booking whichever price happened to be observed on the day a barrier broke
+    inflated wins and losses at once -- live stops set at -15% were realizing
+    -34.9%, with prints as far as 57% below the stop and 54% above the target.
+    Neither is a trade anyone could have made.
+    """
+    for prices, level in [([(1, 4_000)], 9_200),      # gaps far through the stop
+                          ([(1, 30_000)], 13_000)]:   # gaps far through the target
+        _, exit_price, realized, _ = scorecard.score_pick(
+            _fake_pick(), _daily(prices), now=PICKED + timedelta(days=8))
+        assert exit_price == level
+        assert round(realized, 4) == round((level * 0.95 / 10_000 - 1) * 100, 4)
+
+
+def test_a_stop_cannot_realize_worse_than_its_barrier_plus_one_round_trip():
+    """A stop is a floor on the loss. Whatever the market prints, the recorded
+    loss can never exceed the barrier distance plus one round trip of costs."""
+    entry, stop = 10_000, 9_200
+    worst = (stop * 0.95 * 0.98 / entry - 1) * 100      # tax + sell slippage
+    for gap in (9_000, 6_000, 3_000, 500):
+        status, _, realized, _ = scorecard.score_pick(
+            _fake_pick(), _daily([(1, gap)]), sell_slippage_pct=2.0,
+            now=PICKED + timedelta(days=8))
+        assert status == scorecard.STOP
+        assert realized >= worst - 1e-9, f"{gap} printed a loss past the barrier"
+
+
+def test_prices_after_the_deadline_cannot_decide_the_trade(conn):
+    """The loop has gone dark for 48 hours at a time. A pick whose horizon
+    expired unscored must still be graded on its own window, not on whatever the
+    card did afterwards."""
+    pick = _pick(conn, horizon=3)
+    # flat inside the window, then collapses through the stop on day 9
+    status, _, _, _ = scorecard.score_pick(
+        pick, _daily([(1, 10_100), (3, 10_050), (9, 5_000)]),
+        now=PICKED + timedelta(days=12))
+    assert status == scorecard.EXPIRED
 
 
 def test_stop_hit_is_a_loss(conn):
     pick = _pick(conn)
-    status, exit_price, realized = scorecard.score_pick(
+    status, exit_price, realized, _ = scorecard.score_pick(
         pick, _daily([(1, 9_000)]), now=PICKED + timedelta(days=8))
     assert status == scorecard.STOP and realized < 0
 
@@ -53,14 +96,14 @@ def test_stop_hit_is_a_loss(conn):
 def test_whichever_barrier_comes_first_wins(conn):
     pick = _pick(conn)
     # dips to the stop on day 1, then rockets -- must score as stopped
-    status, _, _ = scorecard.score_pick(
+    status, _, _, _ = scorecard.score_pick(
         pick, _daily([(1, 9_000), (2, 20_000)]), now=PICKED + timedelta(days=8))
     assert status == scorecard.STOP
 
 
 def test_expired_marks_out_at_the_last_price(conn):
     pick = _pick(conn)
-    status, exit_price, realized = scorecard.score_pick(
+    status, exit_price, realized, _ = scorecard.score_pick(
         pick, _daily([(1, 10_100), (6, 10_500)]), now=PICKED + timedelta(days=8))
     assert status == scorecard.EXPIRED and exit_price == 10_500
 
@@ -85,7 +128,7 @@ def test_the_chosen_horizon_decides_when_a_trade_expires():
     pick = _fake_pick(horizon_days=7, chosen_horizon_days=14)
     flat = _daily([(d, 10_100) for d in range(1, 13)])
     assert scorecard.score_pick(pick, flat, now=PICKED + timedelta(days=10)) is None
-    status, _, _ = scorecard.score_pick(pick, flat, now=PICKED + timedelta(days=15))
+    status, _, _, _ = scorecard.score_pick(pick, flat, now=PICKED + timedelta(days=15))
     assert status == scorecard.EXPIRED
 
 
@@ -150,9 +193,9 @@ def _closed_pick(conn, pid, *, entry, exit_price, target, at, strategy="legacy",
 def test_score_pick_applies_sell_slippage():
     pick = _fake_pick()
     daily = _daily([(1, 13_500)])
-    _, _, r0 = scorecard.score_pick(pick, daily, sell_slippage_pct=0.0,
+    _, _, r0, _ = scorecard.score_pick(pick, daily, sell_slippage_pct=0.0,
                                     now=PICKED + timedelta(days=8))
-    _, _, r2 = scorecard.score_pick(pick, daily, sell_slippage_pct=2.0,
+    _, _, r2, _ = scorecard.score_pick(pick, daily, sell_slippage_pct=2.0,
                                     now=PICKED + timedelta(days=8))
     assert r2 < r0                       # selling under the going rate nets less
 
@@ -190,6 +233,72 @@ def test_alpha_compares_the_pick_to_the_market_over_the_same_window(conn):
     s = scorecard.summary(conn)
     assert s["return_on_capital_pct"] < 0        # it did lose coins
     assert s["alpha_vs_market_pct"] > 0          # ...and still beat the market
+
+
+def test_a_trade_that_ends_early_still_gets_a_benchmark(conn):
+    """Alpha is the headline, so a missing benchmark is a silent failure.
+
+    The window used to run to the pick's *horizon*, which for a trade that
+    stopped out on day 2 of a 10-day horizon was a date eight days in the future:
+    no prices, no benchmark, no alpha. Live that left all 89 target/stop rows
+    unbenchmarked and computed alpha from the 46 expired ones alone.
+    """
+    _pick(conn, horizon=10)
+    for d, price in ((1, 10_400), (2, 13_500)):     # hits target on day 2
+        futdb.insert_snapshot(conn, player_id="c1", price=price, source="futgg",
+                              at=PICKED + timedelta(days=d))
+    # a second card gives the market median something to be measured on
+    futdb.upsert_card_meta(conn, {"player_id": "c2", "name": "Other"})
+    for d, price in ((0, 20_000), (1, 20_500), (2, 21_000)):
+        futdb.insert_snapshot(conn, player_id="c2", price=price, source="futgg",
+                              at=PICKED + timedelta(days=d))
+    futdb.insert_snapshot(conn, player_id="c1", price=10_000, source="futgg", at=PICKED)
+    conn.commit()
+
+    scorecard.score_open_picks(conn, now=PICKED + timedelta(days=11))
+    row = conn.execute("SELECT status, benchmark_pct FROM pick_log").fetchone()
+    assert row["status"] == scorecard.TARGET
+    assert row["benchmark_pct"] is not None
+
+
+def test_regrade_rescores_closed_picks_under_the_current_rules(conn):
+    """Grading conventions have changed twice. Without this the record is a blend
+    of numbers made by different rules, which is worse than either alone."""
+    _pick(conn, horizon=7)
+    for d, price in ((1, 10_400), (2, 4_000)):     # gaps far through the stop
+        futdb.insert_snapshot(conn, player_id="c1", price=price, source="futgg",
+                              at=PICKED + timedelta(days=d))
+    conn.commit()
+    # a row closed the old way: booked at the price that broke the barrier
+    futdb.close_pick(conn, futdb.open_picks(conn)[0]["id"], status=scorecard.STOP,
+                     exit_price=4_000, realized_pct=-62.0, at=PICKED + timedelta(days=3))
+    conn.commit()
+
+    dry = scorecard.regrade_closed_picks(conn, dry_run=True,
+                                         now=PICKED + timedelta(days=9))
+    assert dry["checked"] == 1 and dry["changed"] == 1
+    assert conn.execute("SELECT exit_price FROM pick_log").fetchone()[0] == 4_000
+
+    scorecard.regrade_closed_picks(conn, now=PICKED + timedelta(days=9))
+    row = conn.execute("SELECT exit_price, realized_pct FROM pick_log").fetchone()
+    assert row["exit_price"] == 9_200                 # the barrier, not the gap
+    assert row["realized_pct"] > -62.0
+
+
+def test_regrade_can_change_a_verdict(conn):
+    """A stop only touched *after* the horizon is an expiry, not a stop."""
+    _pick(conn, horizon=3)
+    for d, price in ((1, 10_100), (3, 10_050), (9, 3_000)):
+        futdb.insert_snapshot(conn, player_id="c1", price=price, source="futgg",
+                              at=PICKED + timedelta(days=d))
+    conn.commit()
+    futdb.close_pick(conn, futdb.open_picks(conn)[0]["id"], status=scorecard.STOP,
+                     exit_price=3_000, realized_pct=-71.0, at=PICKED + timedelta(days=10))
+    conn.commit()
+
+    res = scorecard.regrade_closed_picks(conn, now=PICKED + timedelta(days=12))
+    assert res["status_changed"] == 1
+    assert conn.execute("SELECT status FROM pick_log").fetchone()[0] == scorecard.EXPIRED
 
 
 def test_cheap_penny_card_cannot_fake_the_record(conn):

@@ -99,18 +99,26 @@ def build_run_summary(conn, *, title: str = "fc26", top: int = 6) -> str:
             if p["url"]:
                 lines.append(f"<{p['url']}>")
 
-    s = scorecard.summary(conn, title=title)
-    if s.get("graded"):
+    # Every live strategy, not just the first one. Posting a single strategy made
+    # the summary actively misleading: release_v1's 7 trades were the whole
+    # "record" while relval_v1's 135 were never mentioned.
+    graded_any = False
+    for name, s in scorecard.summaries(conn, title=title).items():
+        if not s.get("graded"):
+            continue
+        graded_any = True
         # Alpha first: the median tradeable card doesn't move over a fortnight, so
         # a flat market already reads as -6.9% once the round trip is paid.
         alpha = (f" · {s['alpha_vs_market_pct']:+.1f}% vs the market"
                  if s.get("alpha_vs_market_pct") is not None else "")
         lines.append(
-            f"📊 Record: {s['hit_target']}W-{s['hit_stop']}L · {s['win_rate']:.0%} win · "
+            f"📊 {name}: {s['hit_target']}W-{s['hit_stop']}L · {s['win_rate']:.0%} win · "
             f"{s['return_on_capital_pct']:+.1f}% on capital{alpha} "
             f"({s['coins_pnl']:+,} coins over {s['graded']} trades, {s['open']} open)")
-    else:
-        lines.append(f"📊 Record: {s.get('total', 0)} picks logged, none graded yet.")
+    if not graded_any:
+        total = sum(s.get("total", 0)
+                    for s in scorecard.summaries(conn, title=title).values())
+        lines.append(f"📊 Record: {total} picks logged, none graded yet.")
 
     return "\n".join(lines)
 

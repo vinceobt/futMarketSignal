@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from futmarket import db as futdb
-from futmarket.ml import picks
+from futmarket.ml import evaluate, picks
 
 
 def _row(**kw):
@@ -204,6 +204,46 @@ def test_the_magnitude_head_is_deliberately_not_consulted():
     import inspect
     args = inspect.signature(picks._choose_horizon).parameters
     assert "excess" not in args and "market_drift" not in args
+
+
+def test_per_day_ranking_prefers_the_quicker_trade():
+    """The default: coins freed early can go into the next trade, so a shorter
+    hold earning almost as much wins."""
+    quick = {3: {"win_net": 30.0, "loss_net": -10.0, "base_rate": 0.37},
+             14: {"win_net": 34.0, "loss_net": -10.0, "base_rate": 0.40}}
+    assert _plan(0.80, payoffs=quick)[0] == 3
+
+
+def test_total_ranking_takes_the_bigger_trade_when_the_days_are_free():
+    """The weekly-cycle trade can only be opened on a Saturday or Sunday, so
+    coming out on Tuesday rather than Thursday frees coins with nothing to do.
+    Charging the trade for those days would pick the worse exit."""
+    quick = {3: {"win_net": 30.0, "loss_net": -10.0, "base_rate": 0.37},
+             14: {"win_net": 34.0, "loss_net": -10.0, "base_rate": 0.40}}
+    assert _plan(0.80, payoffs=quick, rank_by="total")[0] == 14
+
+
+def test_the_weekend_trade_does_not_exist_midweek(conn, monkeypatch):
+    """A gate that names a buy day must say so on the other days, not return an
+    empty list that reads exactly like a broken pipeline (trap #17)."""
+    import datetime as dt
+
+    class Wednesday(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 8, 5, 12, 0, tzinfo=tz)      # a Wednesday
+
+    monkeypatch.setattr(picks, "datetime", Wednesday)
+    # No model is loaded and no dataset is built: the day check comes first, so
+    # this returning cleanly *is* the assertion.
+    assert picks.generate(conn, strategy="weekend_v1") == []
+
+
+def test_the_weekend_trade_is_tier_a_only():
+    """Its edge inverts on tier B (-4.7% against tier A's +4.2%), so the tier
+    restriction lives with the gate and every consumer reads the same one."""
+    assert evaluate.gate_tiers("weekend_v1") == ("A",)
+    assert evaluate.gate_tiers("relval_v1") == evaluate.TRADEABLE_TIERS
 
 
 def test_target_is_capped_at_what_the_gate_has_actually_paid():

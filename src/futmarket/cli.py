@@ -214,32 +214,38 @@ def cmd_scorecard(args) -> None:
           f"{res['stop']} stopped, {res['expired']} expired, "
           f"{res['still_open']} still running\n")
 
-    from .ml.picks import STRATEGY_VERSION
-    # Judge the current strategy on its own by default; --all blends in legacy picks.
-    strat = None if args.all else STRATEGY_VERSION
-    s = scorecard.summary(conn, strategy=strat)
-    if not s.get("graded"):
-        print(f"{s.get('total', 0)} pick(s) recorded, {s.get('closed', 0)} resolved, "
-              f"none tradeable enough to judge yet.")
-        print("Run `futmarket picks --save` daily, and `collect-bulk` regularly "
-              "so there are prices to score against.")
-        legacy = scorecard.summary(conn, strategy="legacy")
-        if legacy.get("graded"):
-            print(f"\nlegacy (old engine): {legacy['graded']} graded, "
-                  f"{legacy['return_on_capital_pct']:+.1f}% on capital")
-        return
-    pnl = s["coins_pnl"]
-    label = "ALL strategies" if args.all else f"strategy '{STRATEGY_VERSION}'"
-    print(f"TRACK RECORD — {label}  (tradeable cards only, net of tax)")
-    print(f"  picks recorded    {s['total']}  ({s['open']} still open)")
-    print(f"  graded            {s['graded']}   target {s['hit_target']} · "
-          f"stop {s['hit_stop']} · flat {s['expired']}")
-    print(f"  win rate          {s['win_rate']:.0%}")
-    print(f"  return on capital {s['return_on_capital_pct']:+.1f}%   "
-          f"← the number that matters (weights by coins at stake)")
-    print(f"  total P&L         {pnl:+,} coins   "
-          f"({s['avg_coins_per_trade']:+,}/trade)")
-    print(f"  median trade      {s['median_return_pct']:+.1f}%")
+    def _report(s: dict, label: str) -> None:
+        print(f"TRACK RECORD — {label}  (tradeable cards only, net of tax)")
+        if not s.get("graded"):
+            print(f"  {s.get('total', 0)} pick(s) recorded, "
+                  f"{s.get('closed', 0)} resolved, none judgeable yet.")
+            return
+        alpha = s.get("alpha_vs_market_pct")
+        print(f"  picks recorded    {s['total']}  ({s['open']} still open)")
+        print(f"  graded            {s['graded']}   target {s['hit_target']} · "
+              f"stop {s['hit_stop']} · flat {s['expired']}")
+        print(f"  win rate          {s['win_rate']:.0%}")
+        # Alpha first: in a market whose median card is inert and whose costs are
+        # 7.4%, "-3% while everything did -9%" is a good call and a raw return
+        # cannot say so.
+        if alpha is not None:
+            print(f"  alpha vs market   {alpha:+.1f}%   ← does it know anything")
+        print(f"  return on capital {s['return_on_capital_pct']:+.1f}%   "
+              f"← what it did to the coin pile")
+        print(f"  total P&L         {s['coins_pnl']:+,} coins   "
+              f"({s['avg_coins_per_trade']:+,}/trade)")
+        print(f"  median trade      {s['median_return_pct']:+.1f}%")
+
+    # Every live strategy, judged separately and all of them shown. Printing only
+    # the first hid the strategy actually under test: release_v1's 7 trades were
+    # the headline while relval_v1's 135 never appeared at all.
+    if args.all:
+        _report(scorecard.summary(conn, strategy=None), "ALL strategies")
+    else:
+        for name, s in scorecard.summaries(conn).items():
+            if s.get("total"):
+                _report(s, f"strategy '{name}'")
+                print()
 
     if not args.all:
         legacy = scorecard.summary(conn, strategy="legacy")
@@ -256,6 +262,31 @@ def cmd_scorecard(args) -> None:
             got = f"{r['realized_pct']:+.1f}%" if r["realized_pct"] is not None else "--"
             print(f"  {r['picked_at'][:10]}  {name:<22} {r['status']:<8} "
                   f"entry {r['entry_price']:>9,}  {got:>8}")
+
+
+def cmd_regrade(args) -> None:
+    """Re-score closed picks under today's grading rules.
+
+    Needed whenever the grading convention changes, because otherwise the record
+    becomes a blend of numbers produced by different rules and the headline stops
+    meaning anything. Back up the database first — this rewrites the history.
+    """
+    config = _load(args)
+    setup_logging(config.log_path)
+    conn = db.connect(config.database_path)
+    source = _resolve_source(conn, args.source, config)
+
+    res = scorecard.regrade_closed_picks(
+        conn, source=source,
+        strategies=None if args.all else scorecard.CURRENT_STRATEGIES,
+        tax_rate=config.tax_rate, sell_slippage_pct=config.sell_slippage_pct,
+        dry_run=args.dry_run)
+    what = "would change" if args.dry_run else "changed"
+    print(f"re-graded {res['checked']} closed pick(s): {res['changed']} {what}, "
+          f"{res['status_changed']} changed outcome, "
+          f"{res['benchmark_added']} gained a benchmark, {res['skipped']} skipped")
+    if args.dry_run:
+        print("nothing written — drop --dry-run to apply")
 
 
 def cmd_picks(args) -> None:
@@ -702,7 +733,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--limit", type=int, default=20, help="how many candidates to show")
     p.add_argument("--strategy", default="all",
                    help="which trade to look for: all | relval_v1 (deep dip) | "
-                        "release_v1 (promo release crash)")
+                        "release_v1 (promo release crash) | weekend_v1 (weekly "
+                        "cycle, Sat/Sun only)")
     p.add_argument("--min-price", type=int, default=1000,
                    help="ignore near-discard cards (their %% moves are noise "
                         "and the coins aren't worth trading)")
@@ -770,6 +802,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--list", type=int, default=0, metavar="N",
                    help="also list the N most recent picks")
     p.set_defaults(func=cmd_scorecard)
+
+    p = sub.add_parser("regrade",
+                       help="re-score closed picks under the current grading rules")
+    p.add_argument("--source", default=None)
+    p.add_argument("--dry-run", action="store_true",
+                   help="report what would change without writing")
+    p.add_argument("--all", action="store_true",
+                   help="include legacy and superseded strategies")
+    p.set_defaults(func=cmd_regrade)
 
     p = sub.add_parser("notify",
                        help="post a short run summary to Discord (needs DISCORD_WEBHOOK_URL)")

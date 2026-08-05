@@ -35,8 +35,10 @@ band is what the card genuinely changes hands for.
 
 from __future__ import annotations
 
+import calendar
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -80,6 +82,42 @@ STRATEGIES: dict[str, dict] = {
         # protection here is the time stop and the card's age, not the floor.
         "allow_below_floor": True,
     },
+    "weekend_v1": {
+        "gate": "weekend_v1",
+        "summary": "a card that breathes hard on the weekly cycle, bought in the weekend dump",
+        # The sell day, expressed as a holding period. Measured on tier A at a
+        # swing floor of 30, the curve peaks sharply and then dies:
+        #
+        #     hold 2d  -2.9% net    hold 5d  -0.1% net
+        #     hold 3d  +2.4% net    hold 6d  -6.9% net
+        #     hold 4d  +4.2% net    hold 7d -14.1% net
+        #
+        # From a Saturday or Sunday buy that is a **Tuesday-to-Thursday** exit,
+        # and holding into the next weekend gives all of it back -- by day 7 the
+        # card is simply back in the next dump. Which of the three a given card
+        # gets is the model's call, not a constant.
+        "horizons": (3, 4, 5),
+        # Tier A only -- see evaluate.GATE_TIERS, which is where that restriction
+        # lives so the backtest, the payoff profile and this shortlist cannot
+        # disagree about who is being traded. It is the whole difference between
+        # a trade and a mirage: at this gate tier B nets -4.7% while tier A nets
+        # +4.2%, and blended the tier-B mass drags the headline under water. A
+        # thin card's "price" is one stale listing, so its weekly "swing" is
+        # partly the collector's sampling rather than the market's.
+        # By construction this trade buys a card at a weekly low, so the 30-day
+        # floor guard (trap #7) would reject exactly what it exists to buy. Left
+        # off so the live gate stays identical to the one measured -- the
+        # backtest above does not apply it either, and a live filter the
+        # measurement never saw is precisely how the two drift apart.
+        "allow_below_floor": True,
+        # Rank horizons by TOTAL expected net, not by return per day held. Per-day
+        # is right when coins freed early can go into another trade, which is why
+        # it is the default -- but this trade only exists on a Saturday or Sunday.
+        # Exiting Tuesday instead of Thursday frees coins that have nothing to do
+        # until the next weekend, so charging the trade for those two days would
+        # pick the worse exit for a benefit that does not exist.
+        "rank_by": "total",
+    },
 }
 DEFAULT_STRATEGY = "release_v1"
 # Kept for callers and tests that just want "the current default".
@@ -108,6 +146,9 @@ STOP_MAX_PCT = 30.0
 # the honest test. (The old engine used this as its main gate, at 1.0.)
 MIN_REWARD_RISK = 0.5
 FALLBACK_TARGET_PCT = 25.0   # when a card's resistance isn't known yet
+# Above this, a card's 30-day high is history rather than a target worth naming
+# in the case for buying it. The best measured trade in the system pays ~35%.
+MAX_QUOTABLE_RESISTANCE_PCT = 100.0
 # What the model must expect before a card is worth the coins and the wait.
 # Silence is a valid answer; the old version had no way to give one.
 MIN_EXPECTED_NET_PCT = 3.0
@@ -181,7 +222,8 @@ def _barriers(market_price: int, entry: int, ceil_pct, floor_pct, *,
 
 def _choose_horizon(clears: dict[int, float], payoffs: dict[int, dict], *,
                     min_expected_net_pct: float = MIN_EXPECTED_NET_PCT,
-                    min_clears_prob: float = MIN_CLEARS_PROB
+                    min_clears_prob: float = MIN_CLEARS_PROB,
+                    rank_by: str = "per_day"
                     ) -> tuple[int, float, float, float] | None:
     """How long to hold this card — or None if no horizon is worth trading.
 
@@ -201,6 +243,12 @@ def _choose_horizon(clears: dict[int, float], payoffs: dict[int, dict], *,
     Among horizons clearing the bar we take the best return **per day held** —
     coins tied up in one card are coins not working in another.
 
+    ``rank_by="total"`` drops that division, for a trade whose entry only exists
+    on certain days. The weekly-cycle trade can only be opened on a Saturday or
+    Sunday, so coming out on Tuesday rather than Thursday frees coins that have
+    nothing to do until the next weekend. Charging those two days against the
+    trade would pick the worse exit to buy an option that cannot be exercised.
+
     Returning None is a real answer and the old code could never give it: if
     nothing clears the 7.4% round trip, the honest recommendation is to buy
     nothing.
@@ -214,9 +262,9 @@ def _choose_horizon(clears: dict[int, float], payoffs: dict[int, dict], *,
                     + (1.0 - probability) * payoff["loss_net"])
         if expected < min_expected_net_pct:
             continue
-        per_day = expected / h
-        if best is None or per_day > best[0]:
-            best = (per_day, h, expected, probability, payoff)
+        score = expected if rank_by == "total" else expected / h
+        if best is None or score > best[0]:
+            best = (score, h, expected, probability, payoff)
     if best is None:
         return None
     _, h, expected, probability, payoff = best
@@ -246,7 +294,13 @@ def _reasons(row: pd.Series) -> list[str]:
         elif floor <= ENTRY_FLOOR_MAX_PCT:
             out.append(f"right at its floor ({floor:.0f}% above the 30-day low)")
     ceil = row.get("dist_to_ceiling_pct")
-    if pd.notna(ceil) and ceil >= 8:
+    # Only when the level is a plausible destination for this trade. On a card
+    # that has crashed, its 30-day high is the price it *used to be* -- quoting
+    # "resistance is 1830% up" as a reason to buy is how a real pick came to
+    # advertise a sell 141% away (see _barriers). The target itself is already
+    # capped at the gate's measured winning payoff; the reason must not promise
+    # more than the target quotes.
+    if pd.notna(ceil) and 8 <= ceil <= MAX_QUOTABLE_RESISTANCE_PCT:
         out.append(f"room to bounce — resistance is {ceil:.0f}% up")
     # How much of the recent move was the card's own rather than the whole market.
     own = row.get("excess_ret_7d")
@@ -262,6 +316,23 @@ def _reasons(row: pd.Series) -> list[str]:
             out.append("Thursday rewards dump — supply flooding in")
         elif dow == 4:
             out.append("Friday promo + Weekend League — heavy supply")
+
+    # How hard this specific card breathes on the weekly cycle. The whole weekend
+    # trade turns on this being large: on an inert card the same weekend buy is a
+    # 4.6% move against a 7.5% round trip, which is a slow way to lose money.
+    swing = row.get("weekend_swing_med")
+    if pd.notna(swing) and swing >= 20:
+        weeks = row.get("weekend_swing_n")
+        seen = f" over {int(weeks)} weeks" if pd.notna(weeks) else ""
+        out.append(f"swings {swing:.0f}% every week{seen} — this one actually "
+                   f"moves enough to pay for the tax")
+    bounce = row.get("dist_to_week_trough_pct")
+    if pd.notna(bounce) and pd.notna(swing) and swing >= 20:
+        if bounce <= 2:
+            out.append("still at this week's low — the dump hasn't turned yet")
+        elif bounce >= 10:
+            out.append(f"already {bounce:.0f}% off this week's low — "
+                       f"you're buying after part of the move")
 
     age = row.get("days_since_card_release")
     if pd.notna(age):
@@ -406,6 +477,19 @@ def generate(conn, *, source: str = "futgg", title: str = "fc26",
     if spec is None:
         raise ValueError(f"unknown strategy {strategy!r}; "
                          f"expected one of {sorted(STRATEGIES)}")
+    # A trade whose gate names a buy day does not exist on the other days, and
+    # saying so beats returning an empty list that reads like a broken pipeline
+    # (trap #17). Checked before the feature matrix is built, which is minutes.
+    day_bounds = evaluate.GATES.get(spec["gate"], {}).get("day_of_week")
+    if day_bounds is not None:
+        today = datetime.now(timezone.utc).weekday()
+        lo, hi = day_bounds
+        if (lo is not None and today < lo) or (hi is not None and today > hi):
+            days = "/".join(calendar.day_name[int(d)]
+                            for d in range(int(lo), int(hi) + 1))
+            logger.info("%s only trades on %s — nothing to do today", strategy, days)
+            return []
+
     clears_art, run = _load_latest_model(conn, kind="clears", title=title)
     excess_art, _ = _load_latest_model(conn, kind="excess", title=title)
     if clears_art is None:
@@ -427,7 +511,11 @@ def generate(conn, *, source: str = "futgg", title: str = "fc26",
         return []
 
     if "liq_tier" in latest.columns:
-        latest = latest[latest["liq_tier"].isin(liquid_tiers)]
+        # A strategy may narrow the universe further than the caller asked. The
+        # weekly-cycle trade is tier A only: its edge inverts on tier B, where a
+        # card's "swing" is partly the collector sampling a stale listing.
+        latest = latest[latest["liq_tier"].isin(
+            evaluate.gate_tiers(spec["gate"], liquid_tiers))]
     # The tradeable universe: the edge lives in cheap/mid cards; expensive icons
     # are priced efficiently and lose after tax.
     latest = latest[(latest["price"] >= min_price) & (latest["price"] <= max_price)]
@@ -465,7 +553,8 @@ def generate(conn, *, source: str = "futgg", title: str = "fc26",
         plan = _choose_horizon(
             {h: float(v[position]) for h, v in clears.items()}, payoffs,
             min_expected_net_pct=min_expected_net_pct,
-            min_clears_prob=min_clears_prob)
+            min_clears_prob=min_clears_prob,
+            rank_by=spec.get("rank_by", "per_day"))
         if plan is not None:
             plans.append(plan)
             keep_index.append(index)
@@ -579,8 +668,10 @@ def generate_all(conn, *, strategies=tuple(STRATEGIES), **kwargs) -> list[Pick]:
     """Every strategy's candidates, best expected return first.
 
     The trades are near-disjoint -- a deep dip and a promo release crash select
-    almost entirely different cards (2.3% overlap) -- so running both roughly
-    doubles the opportunity set rather than duplicating it.
+    almost entirely different cards (2.3% overlap) -- so running them together
+    widens the opportunity set rather than duplicating it. Where two strategies
+    do land on the same card, ``db.has_open_pick`` still allows only one open
+    position, so the record cannot double-count it (trap #15).
     """
     found: list[Pick] = []
     for name in strategies:

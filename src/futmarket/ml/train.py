@@ -50,7 +50,7 @@ HORIZONS = (*evaluate.HORIZONS, 21)
 MIN_TRAIN_ROWS = 200
 # The gates the strategies actually trade. Validation on anything wider flatters:
 # the model is only ever asked about cards that pass one of these.
-TRADED_GATES = ("relval_v1", "release")
+TRADED_GATES = ("relval_v1", "release", "weekend_v1")
 # The gate whose precision is the headline in the training report.
 TRADED_GATE = TRADED_GATES[0]
 
@@ -348,7 +348,7 @@ def train(conn, *, source: str = "futgg", title: str = "fc26",
         gate: evaluate.payoff_profile(
             liquid, gate=gate, horizons=horizons, tax_rate=tax_rate,
             sell_slippage_pct=sell_slippage_pct, buy_premium_pct=buy_premium_pct,
-            n_splits=n_splits)
+            n_splits=n_splits, tiers=evaluate.gate_tiers(gate))
         for gate in TRADED_GATES
     }
     results["payoffs"] = payoffs

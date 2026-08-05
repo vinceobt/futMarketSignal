@@ -45,7 +45,7 @@ MIN_TRADEABLE_PRICE = 1000
 # blending them would hide one working while the other doesn't. Everything else
 # (the old rules engine, and the dip picks graded under the broken stop
 # convention) is reported separately again — see db._migrate.
-CURRENT_STRATEGIES = ("release_v1", "relval_v1")
+CURRENT_STRATEGIES = ("release_v1", "relval_v1", "weekend_v1")
 CURRENT_STRATEGY = CURRENT_STRATEGIES[0]
 
 
@@ -55,8 +55,8 @@ def _parse(ts: str) -> datetime:
 
 def score_pick(pick, daily: list[tuple[str, int, int]], *, tax_rate: float = 0.05,
                sell_slippage_pct: float = 0.0,
-               now: datetime | None = None) -> tuple[str, int, float] | None:
-    """(status, exit_price, realized_pct) for one pick, or None if still open.
+               now: datetime | None = None) -> tuple[str, int, float, str] | None:
+    """(status, exit_price, realized_pct, exit_day) for one pick, else None if open.
 
     ``daily`` is the robust one-price-per-day series from ``db.daily_prices``.
     Whichever barrier a *daily* price closes through first wins; if neither is
@@ -64,6 +64,17 @@ def score_pick(pick, daily: list[tuple[str, int, int]], *, tax_rate: float = 0.0
     price. The realized return is net of EA's tax AND a sell-under-listing
     slippage, so it reflects what you'd actually clear (entry already models the
     buy premium via ``buy_high``).
+
+    **A barrier trade exits at the barrier, not at the price that broke it.** The
+    old version booked whichever daily price it happened to observe on the day a
+    barrier was crossed, which is not a trade anyone could have made in either
+    direction: you have a sell listed *at* the target, so it fills there and not
+    54% above it; and you are watching the position every two hours, so you come
+    out near the stop rather than 57% below it. Both of those are real numbers
+    from the live record -- the convention inflated wins and losses at once and
+    made ``relval_v1`` read -34.9% on stops whose barrier sat at -15%. Genuine gap
+    risk is charged through ``sell_slippage_pct``, where it can be measured,
+    rather than smuggled into the exit price where it cannot.
     """
     now = now or datetime.now(timezone.utc)
     picked = _parse(pick["picked_at"])
@@ -80,20 +91,25 @@ def score_pick(pick, daily: list[tuple[str, int, int]], *, tax_rate: float = 0.0
     def realized(price):
         return (price * sale_net / entry - 1) * 100
 
+    # Only prices *within the horizon* can decide the trade. Scoring runs on a
+    # loop that has missed whole days before now, and without this bound a pick
+    # whose deadline passed unscored gets graded on prices from after it expired.
     picked_day = picked.strftime("%Y-%m-%d")
-    after = [(d, p) for d, p, _ in daily if d > picked_day and p > 0]
-    for _, price in after:
+    deadline_day = deadline.strftime("%Y-%m-%d")
+    after = [(d, p) for d, p, _ in daily
+             if picked_day < d <= deadline_day and p > 0]
+    for day, price in after:
         if price >= pick["target_price"]:
-            return TARGET, price, realized(price)
+            return TARGET, int(pick["target_price"]), realized(pick["target_price"]), day
         if price <= pick["stop_price"]:
-            return STOP, price, realized(price)
+            return STOP, int(pick["stop_price"]), realized(pick["stop_price"]), day
 
     if now < deadline:
         return None                      # still running, no verdict yet
     if not after:
         return None                      # no prices seen since the pick
-    last_price = after[-1][1]
-    return EXPIRED, last_price, realized(last_price)
+    last_day, last_price = after[-1]
+    return EXPIRED, last_price, realized(last_price), last_day
 
 
 def market_return_pct(conn, start_day: str, end_day: str, *, source: str = "futgg",
@@ -121,17 +137,24 @@ def market_return_pct(conn, start_day: str, end_day: str, *, source: str = "futg
     return median(moves) if moves else None
 
 
-def _benchmark_pct(conn, pick, *, source: str, tax_rate: float,
+def _benchmark_pct(conn, pick, exit_day: str, *, source: str, tax_rate: float,
                    sell_slippage_pct: float, cache: dict) -> float | None:
     """``market_return_pct`` over this pick's exact window, charged the same costs.
+
+    The window ends on the day the trade actually came out, **not** on its
+    horizon. Using the horizon looked harmless and silently destroyed most of the
+    alpha record: a trade that stopped out on day 2 of a 10-day horizon asked the
+    market what it did over a window ending eight days in the future, got None
+    back, and stored no benchmark at all. Live, that left every ``target`` and
+    ``stop`` row without a benchmark and only the ``expired`` ones -- the ones
+    that ran their full horizon -- with one, so alpha was being read off the
+    third of the record that had, by construction, gone nowhere.
 
     Cached per window: a scoring run resolves many picks made in the same cycle,
     and the market only needs measuring once per (start, end) pair.
     """
     picked = _parse(pick["picked_at"])
-    horizon = int(pick["chosen_horizon_days"] or pick["horizon_days"])
-    window = (picked.strftime("%Y-%m-%d"),
-              (picked + timedelta(days=horizon)).strftime("%Y-%m-%d"))
+    window = (picked.strftime("%Y-%m-%d"), exit_day)
     if window not in cache:
         cache[window] = market_return_pct(conn, *window, source=source)
     gross = cache[window]
@@ -156,8 +179,8 @@ def score_open_picks(conn, *, title: str = "fc26", source: str = "futgg",
         if outcome is None:
             res["still_open"] += 1
             continue
-        status, exit_price, realized = outcome
-        bench = _benchmark_pct(conn, pick, source=source, tax_rate=tax_rate,
+        status, exit_price, realized, exit_day = outcome
+        bench = _benchmark_pct(conn, pick, exit_day, source=source, tax_rate=tax_rate,
                                sell_slippage_pct=sell_slippage_pct,
                                cache=bench_cache)
         db.close_pick(conn, pick["id"], status=status, exit_price=exit_price,
@@ -165,6 +188,67 @@ def score_open_picks(conn, *, title: str = "fc26", source: str = "futgg",
         res[status] += 1
     conn.commit()
     logger.info("scorecard: %s", res)
+    return res
+
+
+def regrade_closed_picks(conn, *, title: str = "fc26", source: str = "futgg",
+                         strategies: tuple[str, ...] | None = None,
+                         tax_rate: float = 0.05, sell_slippage_pct: float = 0.0,
+                         dry_run: bool = False,
+                         now: datetime | None = None) -> dict:
+    """Re-score already-closed picks against the current grading rules.
+
+    Grading conventions have changed twice now, and both times the stored record
+    silently became a mix of numbers produced by different rules. That is worse
+    than either convention on its own: the headline blends them and means
+    nothing. This re-runs the closed rows through ``score_pick`` as it stands
+    today, which is exact rather than approximate -- the barriers, the entry and
+    the whole price series are all still in the database, so nothing has to be
+    estimated.
+
+    A pick may legitimately change status: a stop that was only touched *after*
+    the horizon is an expiry, not a stop. Rows the market can no longer answer
+    (no prices in their window) are left exactly as they are and counted in
+    ``skipped``.
+    """
+    now = now or datetime.now(timezone.utc)
+    sql = ("SELECT * FROM pick_log WHERE title=? "
+           "AND status IN ('target','stop','expired')")
+    params: list = [title]
+    if strategies:
+        sql += f" AND strategy IN ({','.join('?' * len(strategies))})"
+        params.extend(strategies)
+
+    res = {"checked": 0, "changed": 0, "skipped": 0, "status_changed": 0,
+           "benchmark_added": 0}
+    bench_cache: dict = {}
+    for pick in conn.execute(sql, params).fetchall():
+        res["checked"] += 1
+        daily = db.daily_prices(conn, pick["player_id"], source)
+        outcome = score_pick(pick, daily, tax_rate=tax_rate,
+                             sell_slippage_pct=sell_slippage_pct, now=now)
+        if outcome is None:
+            res["skipped"] += 1
+            continue
+        status, exit_price, realized, exit_day = outcome
+        bench = _benchmark_pct(conn, pick, exit_day, source=source,
+                              tax_rate=tax_rate,
+                              sell_slippage_pct=sell_slippage_pct,
+                              cache=bench_cache)
+        if status != pick["status"]:
+            res["status_changed"] += 1
+        if bench is not None and pick["benchmark_pct"] is None:
+            res["benchmark_added"] += 1
+        if (status != pick["status"] or exit_price != pick["exit_price"]
+                or bench != pick["benchmark_pct"]):
+            res["changed"] += 1
+        if not dry_run:
+            db.close_pick(conn, pick["id"], status=status, exit_price=exit_price,
+                          realized_pct=realized, benchmark_pct=bench,
+                          at=_parse(pick["scored_at"]) if pick["scored_at"] else now)
+    if not dry_run:
+        conn.commit()
+    logger.info("regrade%s: %s", " (dry run)" if dry_run else "", res)
     return res
 
 

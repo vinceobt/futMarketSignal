@@ -263,6 +263,8 @@ _SUPERSEDED = {
 _STRATEGY_LABELS = {
     "release_v1": "Release crash — promo cards 4–6 days old, held ~3 weeks",
     "relval_v1": "Deep dip — oversold cards on their floor, held ~2 weeks",
+    "weekend_v1": "Weekly cycle — cards that swing hard, bought in the weekend "
+                  "dump and sold midweek",
 }
 
 

@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 RETURN_HORIZONS = (1, 3, 7, 14)
 RANGE_WINDOW = 30          # days defining a card's "recent range"
 VOL_WINDOW = 14
+# Weeks of history behind a card's "how much does it breathe" number. Six is a
+# month and a half: long enough that one promo week can't define a card, short
+# enough to follow a card whose liquidity changed.
+WEEKEND_SWING_WEEKS = 6
 # Just enough history to compute a short return. Deliberately low: newly
 # released cards ARE the trade -- the `release` gate buys a promo card on day 4-6
 # of its crash, which measured +11.5% net at +25pp of alpha. A 20-day minimum
@@ -169,6 +173,80 @@ def add_card_features(daily: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def add_weekend_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """How hard this particular card breathes on the weekly supply cycle.
+
+    Rewards flood the market Friday to Sunday and supply dries up midweek, so
+    prices sag into the weekend and recover after it. Measured on the season, the
+    *direction* is the strongest day pattern in the market -- every one of the six
+    best buy/sell day pairs is a weekend buy -- but on the average card the move
+    is only +4.6% gross, which is **-2.6% net** against the 7.5% round trip. Buying
+    "the weekend" as a blanket rule loses money for the same reason ``dip_v1``
+    did: the signal is real and smaller than the tax.
+
+    What makes it tradeable is that the swing is a property of the *individual
+    card* and it persists. Bucketing each weekend trade by the card's own trailing
+    swing (prior weeks only) is cleanly monotonic:
+
+        past swing  0-5%    next trade  -3.2% net
+        past swing 10-15%   next trade  +1.2% net
+        past swing 20-25%   next trade  +6.9% net
+        past swing 30-35%   next trade +19.6% net
+
+    So the trade is not "buy the weekend", it is "buy the cards that breathe, in
+    the weekend" -- and that is what these features say. Most cards are inert;
+    some swing 20% every single week.
+
+    The week is taken to start on **Friday**: the promo drop and the weekend dump
+    are one event, and the recovery belongs to the same cycle. Deliberately
+    exit-agnostic -- amplitude is trough-to-peak, not "Sunday to Thursday", so the
+    features cannot smuggle in an assumed sell day. Which day to sell is a
+    question for the model, not for the feature builder.
+    """
+    if frame.empty:
+        return frame.copy()
+    out = frame.sort_values(["player_id", "date"]).copy()
+    raw = out["date"].astype(str) if isinstance(out["date"].dtype, pd.CategoricalDtype) \
+        else out["date"]
+    dates = pd.to_datetime(raw, format="%Y-%m-%d", errors="coerce")
+    dow = dates.dt.dayofweek                                   # Monday = 0
+    # Friday of the market week this row belongs to.
+    week = dates - pd.to_timedelta((dow - 4) % 7, unit="D")
+
+    # Trough side: Fri/Sat/Sun. Peak side: the Mon-Thu that follows it.
+    trough_px = out["price"].where(dow.isin((4, 5, 6)))
+    peak_px = out["price"].where(dow.isin((0, 1, 2, 3)))
+    weekly = (pd.DataFrame({"player_id": out["player_id"], "week": week,
+                            "trough": trough_px, "peak": peak_px})
+              .groupby(["player_id", "week"], observed=True)
+              .agg(trough=("trough", "min"), peak=("peak", "max")))
+    weekly["swing"] = (weekly["peak"] / weekly["trough"] - 1.0) * 100.0
+    weekly = weekly.sort_index()
+
+    # Prior weeks only. The current week's peak is in the future on the day we
+    # would be buying, so including it would be exactly the leak the whole
+    # pipeline is built to avoid.
+    prior = weekly.groupby(level="player_id", observed=True)["swing"].shift(1)
+    roll = prior.groupby(level="player_id", observed=True).rolling(
+        WEEKEND_SWING_WEEKS, min_periods=2)
+    flat = lambda s: s.reset_index(level=0, drop=True)          # noqa: E731
+    weekly["weekend_swing_med"] = flat(roll.median())
+    weekly["weekend_swing_n"] = flat(roll.count())
+    weekly["weekend_swing_iqr"] = flat(roll.quantile(0.75)) - flat(roll.quantile(0.25))
+
+    out["_week"] = week.values
+    out = out.merge(
+        weekly[["weekend_swing_med", "weekend_swing_n", "weekend_swing_iqr"]],
+        left_on=["player_id", "_week"], right_index=True, how="left")
+
+    # How far this card has already bounced off its low *so far this week* --
+    # uses only prices up to and including today, so it stays past-only.
+    out["dist_to_week_trough_pct"] = (
+        out["price"] / out.groupby(["player_id", "_week"], observed=True)["price"]
+        .cummin() - 1.0) * 100.0
+    return out.drop(columns="_week")
+
+
 def _attributes(conn, title: str) -> pd.DataFrame:
     rows = conn.execute(
         """SELECT player_id, name, rating, position, league, nation, version,
@@ -288,6 +366,7 @@ def build_dataset(conn, *, source: str = "futgg", title: str = "fc26",
     # The market's own drift, before cohorts: "did this card fall less than
     # everything else" is the question the whole strategy now turns on.
     frame = add_market_features(frame)
+    frame = add_weekend_features(frame)
     frame = frame.merge(_attributes(conn, title), on="player_id", how="left")
     frame = add_behaviour_features(frame)
 
@@ -336,6 +415,9 @@ FEATURE_COLUMNS = (
        "is_weekend_window", "rating", "liq_score", "liq_updates_per_day"]
     # the weekly rhythm and the release curve -- see add_behaviour_features
     + ["day_of_week", "days_since_card_release", "release_phase", "is_special"]
+    # how hard this card breathes on the weekly cycle -- see add_weekend_features
+    + ["weekend_swing_med", "weekend_swing_n", "weekend_swing_iqr",
+       "dist_to_week_trough_pct"]
     # social buzz (Reddit/YouTube/X) -- sparse today, grows over time
     + ["buzz_mentions", "buzz_sentiment", "buzz_z"]
     # what kind of news: distance to the big market-moving promos

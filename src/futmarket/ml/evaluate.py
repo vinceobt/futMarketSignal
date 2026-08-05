@@ -40,7 +40,13 @@ logger = logging.getLogger(__name__)
 # Holding periods the strategy is allowed to choose between. The dip signal's
 # edge grows with holding period -- it does not clear the round-trip cost at 5
 # days -- so short horizons are kept only for comparison.
-HORIZONS = (3, 5, 7, 10, 14)
+#
+# 2, 4 and 6 exist for the weekly-cycle trade, where the holding period *is* the
+# sell day: bought on a Sunday, these land on Tuesday, Thursday and Saturday, and
+# without them most of the midweek exits could not be graded at all. The sell day
+# is meant to be an output of the model rather than an assumption baked into the
+# horizon list, which it silently would be if only 3 and 5 were available.
+HORIZONS = (2, 3, 4, 5, 6, 7, 10, 14)
 
 # Cards you could actually sell. Rule #1: everything else is a paper gain.
 TRADEABLE_TIERS = ("A", "B")
@@ -70,7 +76,50 @@ GATES: dict[str, dict[str, tuple[float | None, float | None]]] = {
     # "day nine bottom" folklore: day 4-6 measured better than day 7-9 at every
     # horizon. Base golds are excluded -- they have no release event.
     "release": {"is_special": (1.0, 1.0), "days_since_card_release": (4.0, 6.0)},
+    # The weekly supply cycle. Rewards flood the market Friday to Sunday and
+    # supply dries up midweek, so the trade is to buy into the weekend and sell
+    # into the recovery.
+    #
+    # Note what this gate does NOT say: anything about when to sell. It fixes the
+    # buy day and the kind of card, and the holding period is left to the model,
+    # because the sell day is the open question. (For the record, the best pair on
+    # the median card measured Sunday->Thursday -- a day later than the Wednesday
+    # peak in the weekly table -- but that is an average across every card, and
+    # cheap fodder need not peak when premium cards do.)
+    #
+    # The swing floor is what makes it a trade at all, and it has to be high.
+    # Buying every card in the weekend is +4.6% gross and **-2.6% net**. Measured
+    # across the threshold at a 4-day hold, on tier A:
+    #
+    #     swing >= 10   blended -1.9% net   tier A -3.9%  <- A worse than B
+    #     swing >= 20      +1.6% net (A)   +10.3pp alpha   53% win  n=2,426
+    #     swing >= 30      +4.2% net (A)   +16.7pp alpha   59% win  n=1,059
+    #     swing >= 40      +4.7% net (A)   +12.3pp alpha   58% win  n=  493
+    #
+    # 30 is where the trade earns its costs with a sample still worth trusting.
+    # Two things move together as the floor rises and both matter: tier A goes
+    # from *worse* than tier B to decisively better (the artifact signature
+    # inverting into the real one, as on the release trade), and the absolute
+    # return crosses zero. Alpha alone would have shipped the 10% version, which
+    # loses money in a falling market -- you cannot spend alpha.
+    "weekend_v1": {"day_of_week": (5.0, 6.0),          # Saturday and Sunday
+                   "weekend_swing_med": (30.0, None)},
 }
+
+# Gates that trade a narrower universe than "anything tradeable". Kept beside the
+# gates themselves so the backtest, the payoff profile and the live shortlist all
+# read one definition -- a payoff measured on A+B while only A is traded would
+# price every weekend trade off the losing half of the population.
+GATE_TIERS: dict[str, tuple[str, ...]] = {
+    "weekend_v1": ("A",),
+}
+
+
+def gate_tiers(gate: str | dict | None,
+               default: tuple[str, ...] | None = TRADEABLE_TIERS
+               ) -> tuple[str, ...] | None:
+    """Which liquidity tiers this gate is traded on."""
+    return GATE_TIERS.get(gate, default) if isinstance(gate, str) else default
 
 
 # --- costs ------------------------------------------------------------------
