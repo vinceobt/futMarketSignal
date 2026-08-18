@@ -37,6 +37,26 @@ over a fortnight. So the model predicts how far a card will beat *the market*,
 and a card is only recommended when that is expected to clear the round trip.
 When nothing does, it says **buy nothing** — which is usually the right answer.
 
+## Tech stack
+
+| Layer | Choice | Why |
+|---|---|---|
+| Language | **Python 3.11+** | |
+| Data | **pandas**, **NumPy** | one row per (card, day); the feature matrix runs to millions of rows, so memory layout matters |
+| ML | **scikit-learn** — `HistGradientBoostingClassifier` / `Regressor` | histogram gradient boosting handles the missing values and mixed categoricals natively, and needs no system OpenMP, so it installs clean without Homebrew |
+| Model artifacts | **joblib** | versioned per horizon, with the gate's measured payoff profile stored alongside |
+| Storage | **SQLite** (WAL, `busy_timeout`) | ~2.85M price snapshots in one file; WAL lets the 2-hourly collector write while training reads |
+| HTTP | **httpx** | every collector; ~2s spacing with exponential backoff |
+| Browser | **patchright** (Playwright fork) | only where plain HTTP can't reach — discovering the rotating CDN price-index URL, and the X/Twitter session |
+| Web | **FastAPI** + **Uvicorn** | server-rendered read-only dashboard, no frontend build step |
+| Config | **YAML** + `.env` | runtime knobs in `config.yaml`; credentials never in tracked files |
+| Tooling | **uv**, **pytest**, **GitHub Actions** | 279 tests, none of which touch the network |
+| Deployment | **launchd** (macOS) · **systemd** units + timer (Linux) | the 24/7 loop; see [deploy/](deploy/) |
+
+No frontend framework and no ORM: the dashboard is generated HTML and the queries
+are hand-written SQL, because the schema is small, the read patterns are known,
+and both stayed easier to reason about than the abstraction would have been.
+
 ## Results so far
 
 The system grades every one of its own past calls and reports **alpha** — how the
