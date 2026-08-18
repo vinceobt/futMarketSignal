@@ -34,7 +34,10 @@ MODELS = ["gemini-flash-latest", "gemini-flash-lite-latest"]
 
 # OpenRouter path: paid credits, no daily cap -> finishes in one sitting.
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
-OR_MODELS = ["openrouter/auto"]   # slug verified against /models
+# Which OpenRouter model(s) to use lives in .env, not here: the slug is a
+# deployment choice and changes far more often than this code. Comma-separate
+# to rotate several (each gets its own lane, exactly like the Gemini pool).
+OR_MODELS_ENV = "OPENROUTER_MODEL"
 OR_SHAPE = (
     'Return ONLY a JSON object of exactly this shape (a json object):\n'
     '{"is_call": true|false, "calls": [{"card": string, "version": string|null, '
@@ -146,8 +149,9 @@ def extract_one(client: httpx.Client, key: str, msg: dict,
 
 
 def extract_one_openrouter(client: httpx.Client, key: str, msg: dict,
-                           model: str = OR_MODELS[0]) -> dict:
+                           model: str = "") -> dict:
     """Read one message via OpenRouter. Returns parsed dict."""
+    model = model or load_openrouter_models()[0]
     body = {
         "model": model,
         "temperature": 0,
@@ -164,6 +168,17 @@ def extract_one_openrouter(client: httpx.Client, key: str, msg: dict,
     # Some providers wrap JSON in a ```json fence or add prose; slice to the object.
     i, j = txt.find("{"), txt.rfind("}")
     return json.loads(txt[i:j + 1])
+
+
+def load_openrouter_models() -> list[str]:
+    """The OPENROUTER_MODEL slug(s) from .env, comma-separated for rotation."""
+    for line in (ROOT / ".env").read_text().splitlines():
+        m = re.match(r"^\s*" + OR_MODELS_ENV + r"\s*=\s*(.+?)\s*$", line)
+        if m and m.group(1):
+            return [s.strip() for s in m.group(1).split(",") if s.strip()]
+    raise RuntimeError(
+        f"{OR_MODELS_ENV} not found in .env — set it to an OpenRouter model slug "
+        "(see openrouter.ai/models), e.g. a fast, cheap one for bulk extraction.")
 
 
 def load_openrouter_key() -> str:
@@ -309,9 +324,10 @@ def run_full(db_path: Path, per_call_delay: float = 6.0, log_every: int = 25,
     """Process all un-read FC-26 candidates. Resumable; safe to re-run.
 
     provider: "gemini" (free, daily-capped, multi-key pool) or
-    "openrouter" (paid credits, no daily cap, model from OPENROUTER_MODEL)."""
+    "openrouter" (paid credits, no daily cap, model set by OPENROUTER_MODEL)."""
     if provider == "openrouter":
-        keys, models, call_fn = [load_openrouter_key()], OR_MODELS, extract_one_openrouter
+        keys, models, call_fn = ([load_openrouter_key()], load_openrouter_models(),
+                                 extract_one_openrouter)
     else:
         keys, models, call_fn = load_keys(), MODELS, extract_one
     persist = provider == "openrouter"   # paid lane: ride out transient 429s

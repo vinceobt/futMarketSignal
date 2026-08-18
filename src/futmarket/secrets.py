@@ -1,8 +1,8 @@
 """Credential loading, kept out of the tracked config file.
 
-config.yaml is committed, so anything secret in it is published. (A live Discord
-webhook sat in it for months.) Credentials belong in a gitignored .env, or in the
-real environment, and nowhere else.
+config.yaml is committed, so anything secret in it would be published.
+Credentials belong in a gitignored .env, or in the real environment, and
+nowhere else.
 
 No dependency: .env here is a handful of KEY=value lines, which is all we need.
 Real environment variables always win, so a server can set them properly without
