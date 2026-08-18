@@ -1,33 +1,38 @@
-# fc-market-analytics — project brief
+# Engineering notes
 
-Read this first. It exists so a new session can be useful in five minutes instead
-of rediscovering everything (and re-making the same mistakes).
+Everything below was measured, not assumed. It records what I learned building
+this system: how the EA FC transfer market actually behaves, which trades survive
+costs, which ideas failed, and the bugs that produced convincing but wrong
+numbers along the way.
+
+If you only read one section, read §3 (what I measured) and §4 (the traps).
 
 ---
 
-## 1. What we are building
+## 1. What this is
 
 **A self-improving machine-learning system that learns how EA FC Ultimate Team
-cards behave, and tells the owner what to buy and sell.**
+cards behave, and says what to buy and sell.**
 
-The owner's words: *"a mini almighty trading guru"* — a model that trains on
-history, keeps training forever, and makes independent decisions from what it
-sees on fut.gg, EA's site, and social media.
+The goal I set: a model that trains on history, keeps training forever, and
+makes independent decisions from what it sees on fut.gg, EA's site, and social
+media — not a formula I hand-tuned.
 
 **End goal:** by the EA FC 27 launch (~Sept 2027) the model is at expert level
 and still improving. Training never stops; it carries forward into each new game.
 
-### What the owner explicitly wants
+### Design goals
 - **Extensive training on historical data.** Feed it everything.
 - **Learn behaviour, not formulas** — how cards react to news, promos, reward
   drops, day of week, time of day.
 - **Independent decisions.** It should say *"buy this card, at this price, now"*.
 - **Plain output.** No statistics lectures. Real, actionable calls.
 
-### What the owner explicitly does NOT want
-- **Comparisons against the old rules engine.** It never made money — that's why
-  this project exists. Don't spend effort benchmarking against it.
-- **Mathematical jargon** in explanations. Say what it means for trading.
+### Non-goals
+- **Benchmarking against the old rules engine.** It never made money — that's
+  why this project exists. Beating it would prove nothing.
+- **Statistical jargon in the output.** Every number the system prints has to
+  say what it means for a trade.
 
 ---
 
@@ -173,7 +178,7 @@ appear in a headline.
 
 ---
 
-## 3. Market knowledge we measured (this is the valuable part)
+## 3. What I measured (this is the valuable part)
 
 All of these came from the data, not from assumptions. They drive the features.
 
@@ -218,7 +223,7 @@ day 1   84.4     day 7   67.6     day 13  74.4  ← recovery (+12%)
 
 ## 4. Traps — every one of these was a real bug
 
-**Do not re-introduce these.** Most were caught by the owner checking live prices,
+**Do not re-introduce these.** Most were caught by checking live prices by hand,
 not by tests.
 
 1. **Never quote a price from completed sales.** They describe the last several
@@ -397,7 +402,7 @@ Rate limits are real: use ~1.5–2s between per-card calls with exponential back
 
 1. **News reactions** — the model knows *when* EA announced things but was never
    taught how cards *moved because of it*. Twitter/creator leaks aren't connected
-   at all. The owner asked for this repeatedly; it's the biggest gap.
+   at all. This is the biggest remaining gap.
 2. **Hour-of-day features** — the dump windows above are real, but only July has
    hourly history. The collector banks it now, so this sharpens weekly.
 3. **Live proof of `relval_v1`** — the strategy backtests positive and beats the
@@ -420,20 +425,20 @@ Rate limits are real: use ~1.5–2s between per-card calls with exponential back
 
 ---
 
-## 9. How to work on this
+## 9. Working principles
 
-- **Ship things the owner can look at.** Long measurement detours frustrate; a
+- **Ship something you can look at.** Long measurement detours stall progress; a
   working `picks` output is worth more than another metric.
-- **Show real output early and expect it to be wrong.** The owner spots bad picks
-  in seconds by checking live prices. That feedback loop has been the single most
-  effective debugging tool in this project.
+- **Show real output early and expect it to be wrong.** Checking a pick against
+  the live market takes seconds and exposes bad ones immediately. That loop has
+  been the single most effective debugging tool in this project.
 - **Explain in trading terms**, not statistics.
 - **Be honest about negative results.** The edge-equals-costs finding matters more
   than any optimistic number.
 
 ---
 
-## 10. Where we stopped (2026-08-05) — read this when you return
+## 10. Status as of 2026-08-05
 
 Two things happened on 2026-08-05, and the second is why the first matters.
 

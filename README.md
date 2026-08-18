@@ -1,5 +1,11 @@
 # futmarket
 
+**Learning how the EA FC Ultimate Team market behaves, and trading it.**
+
+![tests](https://github.com/vinceobt/futMarketSignal/actions/workflows/ci.yml/badge.svg)
+![python](https://img.shields.io/badge/python-3.11%2B-blue)
+![license](https://img.shields.io/badge/license-MIT-green)
+
 A self-improving machine-learning system for **EA FC Ultimate Team**. It learns how
 cards behave — how they react to promos, reward drops, day of week, and the
 release-crash cycle — and tells you **what to buy, at what price, and when to sell**.
@@ -7,7 +13,8 @@ release-crash cycle — and tells you **what to buy, at what price, and when to 
 It never trades for you and never touches your EA account. It reads public market
 data, learns from it, and makes recommendations.
 
-> For the full project brief, market findings, and hard-won traps, see
+> For the measured market findings, the strategy rationale, and the traps that
+> produced convincing-but-wrong numbers along the way, see
 > [docs/ENGINEERING-NOTES.md](docs/ENGINEERING-NOTES.md).
 
 ## What it does
@@ -29,6 +36,34 @@ a correct call you can't get out of makes no money.
 over a fortnight. So the model predicts how far a card will beat *the market*,
 and a card is only recommended when that is expected to clear the round trip.
 When nothing does, it says **buy nothing** — which is usually the right answer.
+
+## Results so far
+
+The system grades every one of its own past calls and reports **alpha** — how the
+trade did against the same-month, same-liquidity-tier market — not just raw
+return. Live record as of 2026-08-05:
+
+| Strategy | Graded trades | Return on capital | Alpha vs market | Win rate |
+|---|---|---|---|---|
+| `release_v1` — buy a promo card 4–6 days into its release crash | 7 | **+8.6%** | **+15.5%** | 86% |
+| `relval_v1` — buy a deep dip on its 30-day floor | 137 | **−11.0%** | **−4.9%** | 23% |
+| `weekend_v1` — buy a high-swing card into the weekend trough | *backtest only* | +4.2% | +16.7pp | 59% |
+
+`relval_v1` is losing money and is shown here for the same reason it is still in
+the codebase: **the scoreboard is only worth anything if it reports the losers.**
+Finding that out required first fixing a grader that was measuring itself — stops
+placed at −15% were realizing −34.9%, and two thirds of trades had no benchmark
+recorded at all. That story is in the
+[engineering notes](docs/ENGINEERING-NOTES.md#10-status-as-of-2026-08-05).
+
+### Why most of this market is untradeable
+
+EA's 5% sell tax plus slippage means a round trip must gain **+7.4% just to break
+even** — and the median tradeable card doesn't move at all over a fortnight. So
+the median trade, before any skill is involved, is **−6.9%**. The previous
+strategy bought a shallow dip whose entire bounce was ~4.7%; it was
+mathematically incapable of making money, however good the model got. Every gate
+since has had to clear the round trip before it was allowed to trade.
 
 ## Setup
 
@@ -85,6 +120,8 @@ src/futmarket/
   ml/           the brain (dataset, cohorts, labels, evaluate, train, picks, dashboard)
   cli.py db.py config.py webapp.py …
 tests/          pytest suite (no network)
+docs/           engineering notes + data-source reference
+deploy/         LaunchAgents (macOS) and systemd units (Linux) for 24/7 running
 ```
 
 ## Testing
